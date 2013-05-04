@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <ctype.h>
 #include <fcntl.h>
 #include <assert.h>
 #include <time.h>
@@ -16,11 +17,199 @@
 
 #include "antdefs.h"
 
-char *releasetime = "Jan 21 2008, 12:00:00";
-uint majorrelease = 0;
-uint minorrelease = 6;
+// all version numbering according ant agent for windows 2.2.1
+char *releasetime = "Jul 30 2009, 17:42:56";
+uint majorrelease = 2;
+uint minorrelease = 2;
+uint majorbuild = 7;
+uint minorbuild = 0;
+
+#define GARMIN_TIME_EPOCH 631065600
+
+// it's unclear what the real limits are here-- we should allocate them
+// dynamically.
+#define MAXLAPS 2048            // max of saving laps data before output with trackpoint data
+#define MAXACTIVITIES 2048      // max number of activities
 
 double round(double);
+short
+antshort(uchar * data, int off)
+{
+    return data[off] + (data[off + 1] * 256);
+}
+
+uint
+antuint(uchar * data, int off)
+{
+    return data[off] + (data[off + 1] * 256) +
+        (data[off + 2] * 256 * 256) + (data[off + 3] * 256 * 256 * 256);
+}
+
+typedef struct {
+    int activitynum;
+
+    int startlap;
+    int stoplap;
+
+    uchar sporttype;
+
+} activity_t;
+
+activity_t activitybuf[MAXACTIVITIES];
+int nactivities;
+int nsummarized_activities;
+
+void
+decodeactivity(activity_t * pactivity, int activitynum, uchar * data)
+{
+    pactivity->activitynum = activitynum;
+
+    pactivity->startlap = antshort(data, 2);
+    pactivity->stoplap = antshort(data, 4);
+
+    pactivity->sporttype = data[6];
+}
+
+void
+printactivity(activity_t * pactivity)
+{
+    printf("Activity %d:\n", pactivity->activitynum);
+    printf(" Laps %u-%u\n", pactivity->startlap, pactivity->stoplap);
+    printf(" Sport type %d\n", pactivity->sporttype);
+}
+
+
+typedef struct {
+    int lapnum;
+
+    time_t tv_lap;              // antuint(lapbuf[lap], 4);
+    float tsec;                 // antuint(lapbuf[lap], 8)
+    int cal;                    // antshort(lapbuf[lap], 36);
+    int hr_av;                  // lapbuf[lap][38];
+    int hr_max;                 // lapbuf[lap][39];
+    int cad;                    // lapbuf[lap][41];
+
+    int intensity;              //lapbuf[lap][40];
+    int triggermethod;          //lapbuf[lap][42];
+
+    float max_speed;
+    float dist;
+} lap_t;
+
+int nlaps;
+lap_t lapbuf[MAXLAPS];
+
+void
+decodelap(lap_t * plap, int lapnum, uchar * data)
+{
+    plap->lapnum = lapnum;
+    plap->tv_lap = antuint(data, 4) + GARMIN_TIME_EPOCH;
+    plap->tsec = antuint(data, 8);
+    plap->cal = antuint(data, 8);
+    plap->cal = antshort(data, 36);
+    plap->hr_av = data[38];
+    plap->hr_max = data[39];
+    plap->cad = data[41];
+
+    plap->intensity = data[40]; // TODO: enum
+    plap->triggermethod = data[42];     // TODO: enum
+
+    memcpy((void *) &plap->dist, &data[12], 4);
+    memcpy((void *) &plap->max_speed, &data[16], 4);
+}
+
+void
+printlap(lap_t * plap)
+{
+    printf("Lap %d:\n", plap->lapnum);
+    char tbuf[100];
+    strftime(tbuf, sizeof tbuf, "%Y-%m-%d %H:%M:%S",
+             localtime(&plap->tv_lap));
+    printf(" tv_lap: %s (%ld)\n", tbuf, plap->tv_lap);
+    printf(" tsec: %f\n", plap->tsec);
+    printf(" cal: %d\n", plap->cal);
+    printf(" hr: %d/%d\n", plap->hr_av, plap->hr_max);
+    printf(" cadence: %d\n", plap->cad);
+
+    printf(" intensity: %d\n", plap->intensity);
+    printf(" triggermethod: %d\n", plap->triggermethod);
+
+    printf(" dist: %f\n", plap->dist);
+    printf(" max_speed: %f\n", plap->max_speed);
+}
+
+typedef struct {
+    time_t tv;
+    float alt;
+    float dist;
+    char haspos;
+    double lat;
+    double lon;
+    int hr;
+    int cad;
+    int u1;
+    int u2;
+} trackpoint_t;
+
+trackpoint_t *trackpointbuf[MAXACTIVITIES];     //trackpoints per activity.
+int ntrackpoints[MAXACTIVITIES];        // # of trackpoints per activity.
+int ntotal_trackpoints;
+int current_trackpoint_activity;
+
+void
+decodetrackpoint(trackpoint_t * ptrackpoint, uchar * data)
+{
+    ptrackpoint->tv = antuint(data, 8) + GARMIN_TIME_EPOCH;
+
+    if ((antuint(data, 0) != (uint) 2147483647) ||
+        (antuint(data, 4) != (uint) 2147483647)) {
+        ptrackpoint->haspos = 1;
+        ptrackpoint->lat = antuint(data, 0) * 180.0 / 0x80000000;
+        ptrackpoint->lon = antuint(data, 4) * 180.0 / 0x80000000;
+
+        // keep lon between -180 - 180
+        if (ptrackpoint->lon > 180) {
+            ptrackpoint->lon = ptrackpoint->lon - 360;
+        }
+        // keep lat between -90 - 90
+        if (ptrackpoint->lat > 90) {
+            ptrackpoint->lat = ptrackpoint->lat - 360;
+        }
+
+        memcpy((void *) &ptrackpoint->alt, data + 12, 4);
+    } else {
+        ptrackpoint->haspos = 0;
+        ptrackpoint->lat = 0;
+        ptrackpoint->lon = 0;
+        ptrackpoint->alt = 0;
+    }
+
+    memcpy((void *) &ptrackpoint->dist, data + 16, 4);
+
+    ptrackpoint->hr = data[20];
+    ptrackpoint->cad = data[21];
+    ptrackpoint->u1 = data[22];
+    ptrackpoint->u2 = data[23];
+}
+
+void
+printtrackpoint(trackpoint_t * ptrackpoint)
+{
+    printf("Trackpoint:\n");
+    char tbuf[100];
+    strftime(tbuf, sizeof tbuf, "%Y-%m-%d %H:%M:%S",
+             localtime(&ptrackpoint->tv));
+    printf(" tv: %s (%ld)\n", tbuf, ptrackpoint->tv);
+    printf(" alt: %f\n", ptrackpoint->alt);
+    printf(" dist: %f\n", ptrackpoint->dist);
+    printf(" lat: %f\n", ptrackpoint->lat);
+    printf(" lon: %f\n", ptrackpoint->lon);
+    printf(" hr: %d\n", ptrackpoint->hr);
+    printf(" cad: %d\n", ptrackpoint->cad);
+    printf(" u1: %d\n", ptrackpoint->u1);
+    printf(" u2: %d\n", ptrackpoint->u2);
+}
+
 
 int gottype;
 int sentauth;
@@ -38,17 +227,13 @@ int donebind = 0;
 int sentgetv;
 char *fname = "garmin";
 
-static char ANTSPT_KEY[] = "A8A423B9F55E63C1";  // ANT+Sport key
+static uchar ANTSPT_KEY[] = "A8A423B9F55E63C1"; // ANT+Sport key
 
 static uchar ebuf[MESG_DATA_SIZE];      // response event data gets stored here
 static uchar cbuf[MESG_DATA_SIZE];      // channel event data gets stored here
 
-int passive;
-int semipassive;
 int verbose;
 
-int downloadfinished = 0;
-int downloadstarted = 0;
 int sentid = 0;
 
 uint mydev = 0;
@@ -64,57 +249,87 @@ uint isa405;
 uint waitauth;
 int nphase0;
 char modelname[256];
+char devname[256];
 ushort part = 0;
 ushort ver = 0;
 uint unitid = 0;
 
 
-//char *getversion =    "440dffff00000000fe00000000000000";
-//char *getgpsver =             "440dffff0000000006000200ff000000";
-char *acks[] = {
-    "fe00000000000000",         // get version - 255, 248, 253
-    "0e02000000000000",         // device short name (fr405a) - 525
-//      "1c00020000000000", // no data
-    "0a0002000e000000",         // unit id - 38
-    "0a00020002000000",         // send position
-    "0a00020005000000",         // send time
-    "0a000200ad020000",         // 4 byte something? 0x10270000 = 10000 dec - 1523
-    "0a000200c6010000",         // 3 x 4 ints? - 994
-    "0a00020035020000",         // guessing this is # trackpoints per run - 1066
-    "0a00020097000000",         // load of software versions - 247
-    "0a000200c2010000",         // download runs - 27 (#runs), 990?, 12?
-    "0a00020075000000",         // download laps - 27 (#laps), 149 laps, 12?
-    "0a00020006000000",         // download trackpoints - 1510/99(run marker), ..1510,12
-    "0a000200ac020000",
-    ""
+
+typedef struct {
+    char *cmd;
+    void (*decode_fn) (ushort bloblen, ushort pkttype, ushort pktlen,
+                       int dsize, uchar * data);
+} garmin_decode_t;
+
+void version_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+                    int dsize, uchar * data);
+void name_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+                 int dsize, uchar * data);
+void unit_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+                 int dsize, uchar * data);
+void position_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+                     int dsize, uchar * data);
+void time_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+                 int dsize, uchar * data);
+void software_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+                     int dsize, uchar * data);
+void activities_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+                       int dsize, uchar * data);
+void laps_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+                 int dsize, uchar * data);
+void trackpoints_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+                        int dsize, uchar * data);
+void unknown_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+                    int dsize, uchar * data);
+void generic_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+                    int dsize, uchar * data);
+
+//char *getversion = "440dffff00000000fe00000000000000";
+//char *getgpsver = "440dffff0000000006000200ff000000";
+garmin_decode_t cmds[] = {
+    {"fe00000000000000", &version_decode},      // get version - 255, 248, 253
+    {"0e02000000000000", &name_decode}, // device short name (fr405a) - 525
+    //    "1c00020000000000", // no data
+    {"0a0002000e000000", &unit_decode}, // unit id - 38
+    {"0a00020002000000", &position_decode},     // send position
+    {"0a00020005000000", &time_decode}, // send time
+    {"0a000200ad020000", &unknown_decode},      // 4 byte something? 0x10270000 = 10000 dec - 1523
+    {"0a000200c6010000", &unknown_decode},      // 3 x 4 ints? - 994
+    {"0a00020035020000", &unknown_decode},      // guessing this is # trackpoints per run - 1066 (w! doesn't seem to be for the 405.)
+    {"0a00020097000000", &software_decode},     // load of software versions - 247
+    {"0a000200c2010000", &activities_decode},   // download activities  - 27 (#runs), 990?, 12?
+    {"0a00020075000000", &laps_decode}, // download laps - 27 (#laps), 149 laps, 12?
+    {"0a00020006000000", &trackpoints_decode},  // download trackpoints - 1510/99(run marker), ..1510,12
+    {"", NULL},
 };
 
-int sentcmd;
+static int nlastcompletedcmd = -1;
+static int nacksent = 0;
+static uchar ackpkt[100];
 
-uchar clientid[3][8];
+
 
 int authfd = -1;
 char *authfile;
-int outfd;                      // output file
-char *fn = "default_output_file";
 char *progname;
 
-#define BSIZE 8*100
-uchar *burstbuf = 0;
+
+// blast and bsize are intertwined with the underlying buffers in antlib.c;
+// we should remove these variables and strengthen the interface.
 uchar *blast = 0;
 int blsize = 0;
-int bused = 0;
-int lseq = -1;
+
 
 /* round a float as garmin does it! */
 /* shoot me for writing this! */
 char *
-ground(double d)
+ground(double d, int decimals)
 {
     int neg = 0;
     static char res[30];
     ulong ival;
-    ulong l;                    /* hope it doesn't overflow */
+    ulong l;                    // hope it doesn't overflow
 
     if (d < 0) {
         neg = 1;
@@ -127,6 +342,7 @@ ground(double d)
         l = l / 10 + 1;
     else
         l = l / 10;
+
     sprintf(res, "%s%ld.%07ld", neg ? "-" : "", ival, l);
     return res;
 }
@@ -161,23 +377,41 @@ randno(void)
 }
 
 void
-print_tcx_header(FILE * tcxfile)
+print_duration(int secs)
+{
+    int hours = secs / 3600;
+    secs -= (hours * 3600);
+    int mins = secs / 60;
+    secs -= (mins * 60);
+    char *sep = "";
+    if (hours > 0) {
+        printf("%d hours", hours);
+        sep = ", ";
+    }
+    if (mins > 0) {
+        printf("%s%d minutes", sep, mins);
+        sep = ", ";
+    }
+
+    printf("%s%d seconds", sep, secs);
+}
+
+void
+write_tcx_header(FILE * tcxfile)
 {
     fprintf(tcxfile,
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n");
     fprintf(tcxfile,
-            "<TrainingCenterDatabase xmlns=\"http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://www.garmin.com/xmlschemas/ActivityExtension/v2 http://www.garmin.com/xmlschemas/ActivityExtensionv2.xsd http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2 http://www.garmin.com/xmlschemas/TrainingCenterDatabasev2.xsd\">\n\n");
+            "<TrainingCenterDatabase xmlns=\"http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2 http://www.garmin.com/xmlschemas/TrainingCenterDatabasev2.xsd\">\n\n");
     fprintf(tcxfile, "  <Activities>\n");
     return;
 }
 
 void
-print_tcx_footer(FILE * tcxfile)
+write_tcx_footer(FILE * tcxfile)
 {
-    fprintf(tcxfile, "        </Track>\n");
-    fprintf(tcxfile, "      </Lap>\n");
     fprintf(tcxfile, "      <Creator xsi:type=\"Device_t\">\n");
-    fprintf(tcxfile, "        <Name>%s</Name>\n", modelname);
+    fprintf(tcxfile, "        <Name>%s</Name>\n", devname);
     fprintf(tcxfile, "        <UnitId>%u</UnitId>\n", unitid);
     fprintf(tcxfile, "        <ProductID>%u</ProductID>\n", part);
     fprintf(tcxfile, "        <Version>\n");
@@ -192,25 +426,301 @@ print_tcx_footer(FILE * tcxfile)
     fprintf(tcxfile, "    </Activity>\n");
     fprintf(tcxfile, "  </Activities>\n\n");
     fprintf(tcxfile, "  <Author xsi:type=\"Application_t\">\n");
-    fprintf(tcxfile, "    <Name>Garmin ANT for Linux</Name>\n");
+    fprintf(tcxfile, "    <Name>Garmin ANT Agent(tm)</Name>\n");
     fprintf(tcxfile, "    <Build>\n");
     fprintf(tcxfile, "      <Version>\n");
     fprintf(tcxfile, "        <VersionMajor>%u</VersionMajor>\n",
             majorrelease);
     fprintf(tcxfile, "        <VersionMinor>%u</VersionMinor>\n",
             minorrelease);
-    fprintf(tcxfile, "        <BuildMajor>0</BuildMajor>\n");
-    fprintf(tcxfile, "        <BuildMinor>0</BuildMinor>\n");
+    fprintf(tcxfile, "        <BuildMajor>%u</BuildMajor>\n", majorbuild);
+    fprintf(tcxfile, "        <BuildMinor>%u</BuildMinor>\n", minorbuild);
     fprintf(tcxfile, "      </Version>\n");
     fprintf(tcxfile, "      <Type>Release</Type>\n");
     fprintf(tcxfile, "      <Time>%s</Time>\n", releasetime);
-    fprintf(tcxfile, "      <Builder>make</Builder>\n");
+    fprintf(tcxfile, "      <Builder>sqa</Builder>\n");
     fprintf(tcxfile, "    </Build>\n");
     fprintf(tcxfile, "    <LangID>EN</LangID>\n");
-    fprintf(tcxfile, "    <PartNumber>006-A0XXX-00</PartNumber>\n");
+    fprintf(tcxfile, "    <PartNumber>006-A0214-00</PartNumber>\n");
     fprintf(tcxfile, "  </Author>\n\n");
     fprintf(tcxfile, "</TrainingCenterDatabase>\n");
     return;
+}
+
+void
+write_trackpoint(FILE * tcxfile, activity_t * pact, lap_t * plap,
+                 trackpoint_t * ptrackpoint)
+{
+    char tbuf[100];
+    strftime(tbuf, sizeof tbuf, "%Y-%m-%dT%H:%M:%SZ",
+             gmtime(&ptrackpoint->tv));
+
+    fprintf(tcxfile, "          <Trackpoint>\n");
+    fprintf(tcxfile, "            <Time>%s</Time>\n", tbuf);
+    if (ptrackpoint->haspos) {
+        fprintf(tcxfile, "            <Position>\n");
+        fprintf(tcxfile,
+                "              <LatitudeDegrees>%s</LatitudeDegrees>\n",
+                ground(ptrackpoint->lat, 7));
+        fprintf(tcxfile,
+                "              <LongitudeDegrees>%s</LongitudeDegrees>\n",
+                ground(ptrackpoint->lon, 7));
+        fprintf(tcxfile, "            </Position>\n");
+        fprintf(tcxfile,
+                "            <AltitudeMeters>%s</AltitudeMeters>\n",
+                ground(ptrackpoint->alt, 2));
+    }
+    // last trackpoint has utopic distance, 40000km should be enough, hack?
+    if (ptrackpoint->dist < (float) 40000000) {
+        fprintf(tcxfile,
+                "            <DistanceMeters>%s</DistanceMeters>\n",
+                ground(ptrackpoint->dist, 2));
+    }
+    if (ptrackpoint->hr > 0) {
+        fprintf(tcxfile,
+                "            <HeartRateBpm xsi:type=\"HeartRateInBeatsPerMinute_t\">\n");
+        fprintf(tcxfile, "              <Value>%d</Value>\n",
+                ptrackpoint->hr);
+        fprintf(tcxfile, "            </HeartRateBpm>\n");
+    }
+    // for bikes the cadence is written here and for the footpod in <Extensions>, why garmin?
+    if (pact->sporttype == 1) {
+        if (plap->cad != 255) {
+            fprintf(tcxfile, "            <Cadence>%d</Cadence>\n",
+                    plap->cad);
+        }
+    }
+    if (ptrackpoint->dist < (float) 40000000) {
+        fprintf(tcxfile, "            <SensorState>%s</SensorState>\n",
+                ptrackpoint->u1 ? "Present" : "Absent");
+        if (ptrackpoint->u1 == 1 || ptrackpoint->cad != 255) {
+            fprintf(tcxfile, "            <Extensions>\n");
+            fprintf(tcxfile,
+                    "              <TPX xmlns=\"http://www.garmin.com/xmlschemas/ActivityExtension/v2\" CadenceSensor=\"");
+            // get type of pod from data, could not figure it out, so using sporttyp of first track
+            if (pact->sporttype == 1) {
+                fprintf(tcxfile, "Bike\"/>\n");
+            } else {
+                fprintf(tcxfile, "Footpod\"");
+                if (ptrackpoint->cad != 255) {
+                    fprintf(tcxfile, ">\n");
+                    fprintf(tcxfile,
+                            "                <RunCadence>%d</RunCadence>\n",
+                            ptrackpoint->cad);
+                    fprintf(tcxfile, "              </TPX>\n");
+                } else {
+                    fprintf(tcxfile, "/>\n");
+                }
+            }
+            fprintf(tcxfile, "            </Extensions>\n");
+        }
+    }
+    fprintf(tcxfile, "          </Trackpoint>\n");
+}
+
+
+
+void
+write_output_files()
+{
+    printf("Writing output files.\n");
+    int activity = 0;
+    float total_time = 0;
+    for (activity = 0; activity < MAXACTIVITIES; activity++) {
+        activity_t *pact = &activitybuf[activity];
+        if (pact->activitynum == -1) {
+            continue;
+        }
+
+        int trackpoint = 0;
+        char tbuf[100];
+        FILE *tcxfile = NULL;
+        int lap = 0;
+        float activity_time = 0;
+
+        // use first lap starttime as filename
+        strftime(tbuf, sizeof tbuf, "%Y-%m-%d-%H%M%S.TCX",
+                 localtime(&lapbuf[pact->startlap].tv_lap));
+        // open file and start with header of xml file
+        printf("Writing output file for activity %d: %s ", activity, tbuf);
+        tcxfile = fopen(tbuf, "wt");
+        write_tcx_header(tcxfile);
+
+        // print the activity header.
+        strftime(tbuf, sizeof tbuf, "%Y-%m-%dT%H:%M:%SZ",
+                 gmtime(&lapbuf[pact->startlap].tv_lap));
+
+        fprintf(tcxfile, "    <Activity Sport=\"");
+        switch (pact->sporttype) {
+        case 0:
+            fprintf(tcxfile, "Running");
+            break;
+        case 1:
+            fprintf(tcxfile, "Biking");
+            break;
+        case 2:
+            fprintf(tcxfile, "Other");
+            break;
+        default:
+            fprintf(tcxfile, "unknown value: %d", pact->sporttype);
+        }
+        fprintf(tcxfile, "\">\n");
+        fprintf(tcxfile, "      <Id>%s</Id>\n", tbuf);
+
+        for (lap = pact->startlap; lap <= pact->stoplap; lap++) {
+            lap_t *plap = &lapbuf[lap];
+            if (plap->lapnum == -1) {
+                printf("Attempt to print uninitialized lap %d.\n", lap);
+                exit(1);
+            }
+
+            activity_time += plap->tsec;
+            total_time += plap->tsec;
+
+            strftime(tbuf, sizeof tbuf, "%Y-%m-%dT%H:%M:%SZ",
+                     gmtime(&plap->tv_lap));
+
+            fprintf(tcxfile, "      <Lap StartTime=\"%s\">\n", tbuf);
+            fprintf(tcxfile,
+                    "        <TotalTimeSeconds>%s</TotalTimeSeconds>\n",
+                    ground(plap->tsec / 100, 2));
+            fprintf(tcxfile,
+                    "        <DistanceMeters>%s</DistanceMeters>\n",
+                    ground(plap->dist, 2));
+            fprintf(tcxfile, "        <MaximumSpeed>%s</MaximumSpeed>\n",
+                    ground(plap->max_speed, 7));
+            fprintf(tcxfile, "        <Calories>%d</Calories>\n",
+                    plap->cal);
+            if (plap->hr_av > 0) {
+                fprintf(tcxfile,
+                        "        <AverageHeartRateBpm xsi:type=\"HeartRateInBeatsPerMinute_t\">\n");
+                fprintf(tcxfile, "          <Value>%d</Value>\n",
+                        plap->hr_av);
+                fprintf(tcxfile, "        </AverageHeartRateBpm>\n");
+            }
+            if (plap->hr_max > 0) {
+                fprintf(tcxfile,
+                        "        <MaximumHeartRateBpm xsi:type=\"HeartRateInBeatsPerMinute_t\">\n");
+                fprintf(tcxfile, "          <Value>%d</Value>\n",
+                        plap->hr_max);
+                fprintf(tcxfile, "        </MaximumHeartRateBpm>\n");
+            }
+            fprintf(tcxfile, "        <Intensity>");
+            switch (plap->intensity) {
+            case 0:
+                fprintf(tcxfile, "Active");
+                break;
+            case 1:
+                fprintf(tcxfile, "Rest");
+                break;
+            default:
+                fprintf(tcxfile, "unknown value: %d", plap->intensity);
+            }
+            fprintf(tcxfile, "</Intensity>\n");
+            // for bike the average cadence of this lap is here
+            if (pact->sporttype == 1) {
+                if (plap->cad != 255) {
+                    fprintf(tcxfile, "        <Cadence>%d</Cadence>\n",
+                            plap->cad);
+                }
+            }
+            fprintf(tcxfile, "        <TriggerMethod>");
+            switch (plap->triggermethod) {
+            case 4:
+                fprintf(tcxfile, "Heartrate");
+                break;
+            case 3:
+                fprintf(tcxfile, "Time");
+                break;
+            case 2:
+                fprintf(tcxfile, "Location");
+                break;
+            case 1:
+                fprintf(tcxfile, "Distance");
+                break;
+            case 0:
+                fprintf(tcxfile, "Manual");
+                break;
+            default:
+                fprintf(tcxfile, "unknown value: %d", plap->triggermethod);
+            }
+            fprintf(tcxfile, "</TriggerMethod>\n");
+
+            // I prefer the average run cadence here than at the end of
+            // this lap according windows ANTagent
+            if (pact->sporttype == 0) {
+                if (plap->cad != 255) {
+                    fprintf(tcxfile, "        <Extensions>\n");
+                    fprintf(tcxfile,
+                            "          <LX xmlns=\"http://www.garmin.com/xmlschemas/ActivityExtension/v2\">\n");
+                    fprintf(tcxfile,
+                            "            <AvgRunCadence>%d</AvgRunCadence>\n",
+                            plap->cad);
+                    fprintf(tcxfile, "          </LX>\n");
+                    fprintf(tcxfile, "        </Extensions>\n");
+                }
+            }
+
+            /*
+               if (dbg) printf("i %u tv %d tv_lap %d tv_previous %d\n", i, tv, tv_lap, tv_previous);
+               if (tv_previous == tv_lap) {
+               i -= 24;
+               tv = tv_previous;
+               }
+               track_pause = 0;
+               // track pause only if following trackpoint is aswell 'timemarker' with utopic distance
+               if (track_pause && ptrackpoint->dist > (float)40000000) {
+               fprintf(tcxfile, "        </Track>\n");
+               fprintf(tcxfile, "        <Track>\n");
+
+               // maybe if we recieve utopic position and distance this tells pause in the run (stop and go) if not begin or end of lap
+               if (ptrackpoint->dist > (float)40000000 && track_pause == 0) {
+               track_pause = 1;
+               if (dbg) printf("track pause (stop and go)\n");
+               } else {
+               track_pause = 0;
+               }
+               }
+             */
+
+            fprintf(tcxfile, "        <Track>\n");
+
+            for (; trackpoint < ntrackpoints[pact->activitynum];
+                 trackpoint++) {
+                trackpoint_t *ptrackpoint =
+                    &trackpointbuf[pact->activitynum][trackpoint];
+                // trackpoints go inside of laps that they're within timewise.
+                if ((lap < pact->stoplap) &&
+                    (ptrackpoint->tv > lapbuf[lap + 1].tv_lap)) {
+                    break;
+                }
+                write_trackpoint(tcxfile, pact, plap, ptrackpoint);
+            }
+            // repeat the last trackpoint in the next lap if it's the same second as
+            // this one.
+            if ((trackpoint > 0) && (lap < pact->stoplap) &&
+                (trackpointbuf[pact->activitynum][trackpoint - 1].tv ==
+                 lapbuf[lap + 1].tv_lap)) {
+                trackpoint--;
+            }
+
+            fprintf(tcxfile, "        </Track>\n");
+            fprintf(tcxfile, "      </Lap>\n");
+        }
+
+        // add footer and close file
+        write_tcx_footer(tcxfile);
+        fclose(tcxfile);
+
+        printf("(");
+        print_duration(activity_time / 100.0);
+        printf(")\n");
+    }
+
+
+    printf("Downloaded %d activities; ", nactivities);
+    print_duration(total_time / 100.0);
+    printf(" of data.\n");
 }
 
 
@@ -248,57 +758,54 @@ struct pair_msg {
 #define ACKSIZE 8               // above structure must be this size
 #define AUTHSIZE 24             // ditto
 #define PAIRSIZE 16
-#define MAXLAPS 256             // max of saving laps data before output with trackpoint data
-#define MAXTRACK 256            // max number of tracks to be saved per download
 
-decode(ushort bloblen, ushort pkttype, ushort pktlen, int dsize,
-       uchar * data)
+void
+generic_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+               int dsize, uchar * data)
 {
-    int i;
-    int j;
-    int hr;
-    int hr_av;
-    int hr_max;
-    int cal;
-    float tsec;
-    float max_speed;
-    int cad;
-    int u1, u2;
+    printf("decode %d %d %d %d\n", bloblen, pkttype, pktlen, dsize);
     int doff = 20;
+    int i = 0;
+    switch (pkttype) {
+    default:
+        printf("don't know how to decode packet type %d\n", pkttype);
+        for (i = doff; i < dsize && i < doff + pktlen; i++)
+            printf("%02x", data[i]);
+        printf("\n");
+        for (i = doff; i < dsize && i < doff + pktlen; i++)
+            if (isprint(data[i]))
+                printf("%c", data[i]);
+            else
+                printf(".");
+        printf("\n");
+        exit(1);
+    }
+}
+
+
+void
+version_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+               int dsize, uchar * data)
+{
+    int doff = 20;
+    int i = 0;
     char model[256];
     char gpsver[256];
-    char devname[256];
-    float alt;
-    float dist;
-    uint tv;
-    uint tv_previous = 0;
-    time_t ttv;
-    char tbuf[100];
-    struct tm *tmp;
-    double lat, lon;
-    uint nruns;
-    uint tv_lap;
-    static uchar lapbuf[MAXLAPS][48];
-    static ushort lap = 0;
-    static ushort lastlap = 0;
-    static ushort track = 0;
-    static short previoustrack_id = -1;
-    static short track_id = -1;
-    static short firsttrack_id = -1;
-    static short firstlap_id = -1;
-    static ushort firstlap_id_track[MAXTRACK];
-    static uchar sporttyp_track[MAXTRACK];
-    static FILE *tcxfile = NULL;
-    static ushort track_pause = 0;
+    printf("version decode %d %d %d %d\n", bloblen, pkttype, pktlen,
+           dsize);
 
+    // any response here allows us to move forward.
+    if (nacksent > nlastcompletedcmd) {
+        printf("completed command %d %d\n", nacksent, nlastcompletedcmd);
+        nlastcompletedcmd = nacksent;
+    }
 
-    printf("decode %d %d %d %d\n", bloblen, pkttype, pktlen, dsize);
     switch (pkttype) {
     case 255:
         memset(model, 0, sizeof model);
         memcpy(model, data + doff + 4, dsize - 4);
-        part = data[doff] + data[doff + 1] * 256;
-        ver = data[doff + 2] + data[doff + 3] * 256;
+        part = antshort(data, doff);
+        ver = antshort(data, doff + 2);
         printf("%d Part#: %d ver: %d Name: %s\n", pkttype,
                part, ver, model);
         break;
@@ -313,393 +820,417 @@ decode(ushort bloblen, ushort pkttype, ushort pktlen, int dsize,
             printf("%d.%d.%d\n", data[doff + i], data[doff + i + 1],
                    data[doff + i + 2]);
         break;
+    default:
+        generic_decode(bloblen, pkttype, pktlen, dsize, data);
+    }
+}
+
+void
+name_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+            int dsize, uchar * data)
+{
+    int doff = 20;
+    printf("name decode %d %d %d %d\n", bloblen, pkttype, pktlen, dsize);
+
+    // any response here allows us to move forward.
+    if (nacksent > nlastcompletedcmd) {
+        printf("completed command %d %d\n", nacksent, nlastcompletedcmd);
+        nlastcompletedcmd = nacksent;
+    }
+
+    switch (pkttype) {
     case 525:
         memset(devname, 0, sizeof devname);
         memcpy(devname, data + doff, dsize);
         printf("%d Devname %s\n", pkttype, devname);
         break;
-    case 12:
-        printf("%d xfer complete", pkttype);
-        for (i = 0; i < pktlen; i += 2)
-            printf(" %u", data[doff + i] + data[doff + i + 1] * 256);
-        printf("\n");
-        switch (data[doff] + data[doff + 1] * 256) {
-        case 6:
-            // last file completed, add footer and close file
-            print_tcx_footer(tcxfile);
-            fclose(tcxfile);
-            break;
-        case 117:
-            break;
-        case 450:
-            break;
-        default:
-            break;
-        }
-        break;
+    default:
+        generic_decode(bloblen, pkttype, pktlen, dsize, data);
+    }
+}
+
+void
+unit_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+            int dsize, uchar * data)
+{
+    int doff = 20;
+    printf("unit decode %d %d %d %d\n", bloblen, pkttype, pktlen, dsize);
+
+    // any response here allows us to move forward.
+    if (nacksent > nlastcompletedcmd) {
+        printf("completed command %d %d\n", nacksent, nlastcompletedcmd);
+        nlastcompletedcmd = nacksent;
+    }
+
+    switch (pkttype) {
     case 38:
-        unitid = data[doff] + data[doff + 1] * 256 +
-            data[doff + 2] * 256 * 256 + data[doff + 3] * 256 * 256 * 256;
+        unitid = antuint(data, doff);
         printf("%d unitid %u\n", pkttype, unitid);
         break;
-    case 27:
-        nruns = data[doff] + data[doff + 1] * 256;
-        printf("%d nruns %u\n", pkttype, nruns);
-        break;
-    case 1523:
-    case 994:
-    case 1066:
-        printf("%d ints?", pkttype);
-        for (i = 0; i < pktlen; i += 4)
-            printf(" %u", data[doff + i] + data[doff + i + 1] * 256 +
-                   data[doff + i + 2] * 256 * 256 + data[doff + i +
-                                                         3] * 256 * 256 *
-                   256);
-        printf("\n");
-        break;
-    case 14:
-        printf("%d time: ", pkttype);
-        printf("%02u-%02u-%u %02u:%02u:%02u\n", data[doff], data[doff + 1],
-               data[doff + 2] + data[doff + 3] * 256, data[doff + 4],
-               data[doff + 6], data[doff + 7]);
-        break;
+    default:
+        generic_decode(bloblen, pkttype, pktlen, dsize, data);
+    }
+}
+
+void
+position_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+                int dsize, uchar * data)
+{
+    int doff = 20;
+    int i = 0;
+    printf("position decode %d %d %d %d\n", bloblen, pkttype, pktlen,
+           dsize);
+
+    // any response here allows us to move forward.
+    if (nacksent > nlastcompletedcmd) {
+        printf("completed command %d %d\n", nacksent, nlastcompletedcmd);
+        nlastcompletedcmd = nacksent;
+    }
+
+    switch (pkttype) {
     case 17:
         printf("%d position ? ", pkttype);
         for (i = 0; i < pktlen; i += 4)
-            printf(" %u", data[doff + i] + data[doff + i + 1] * 256 +
-                   data[doff + i + 2] * 256 * 256 + data[doff + i +
-                                                         3] * 256 * 256 *
-                   256);
+            printf(" %u", antuint(data, doff + i));
         printf("\n");
         break;
-    case 99:
-        printf("%d trackindex %u\n", pkttype,
-               data[doff] + data[doff + 1] * 256);
-        printf("%d shorts?", pkttype);
-        for (i = 0; i < pktlen; i += 2)
-            printf(" %u", data[doff + i] + data[doff + i + 1] * 256);
-        printf("\n");
-        track_id = data[doff] + data[doff + 1] * 256;
+    default:
+        generic_decode(bloblen, pkttype, pktlen, dsize, data);
+    }
+}
+
+void
+time_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+            int dsize, uchar * data)
+{
+    int doff = 20;
+    printf("time decode %d %d %d %d\n", bloblen, pkttype, pktlen, dsize);
+
+    // any response here allows us to move forward.
+    if (nacksent > nlastcompletedcmd) {
+        printf("completed command %d %d\n", nacksent, nlastcompletedcmd);
+        nlastcompletedcmd = nacksent;
+    }
+
+    switch (pkttype) {
+    case 14:
+        printf("%d time: ", pkttype);
+        printf("%02u-%02u-%u %02u:%02u:%02u\n", data[doff], data[doff + 1],
+               antshort(data, doff + 2), data[doff + 4], data[doff + 6],
+               data[doff + 7]);
         break;
-    case 990:
-        printf("%d track %u lap %u-%u sport %u\n", pkttype,
-               data[doff] + data[doff + 1] * 256,
-               data[doff + 2] + data[doff + 3] * 256,
-               data[doff + 4] + data[doff + 5] * 256, data[doff + 6]);
-        printf("%d shorts?", pkttype);
-        for (i = 0; i < pktlen; i += 2)
-            printf(" %u", data[doff + i] + data[doff + i + 1] * 256);
-        printf("\n");
-        if (firstlap_id == -1)
-            firstlap_id = data[doff + 2] + data[doff + 3] * 256;
-        if (firsttrack_id == -1)
-            firsttrack_id = data[doff] + data[doff + 1] * 256;
-        track = (data[doff] + data[doff + 1] * 256) - firsttrack_id;
-        if (track < MAXTRACK) {
-            firstlap_id_track[track] =
-                data[doff + 2] + data[doff + 3] * 256;
-            sporttyp_track[track] = data[doff + 6];
-        } else {
-            printf
-                ("Error: track and lap data temporary array out of range %u!\n",
-                 track);
-        }
-        break;
-    case 1510:
-        printf("%d waypoints", pkttype);
-        for (i = 0; i < 4 && i < pktlen; i += 4)
-            printf(" %u", data[doff + i] + data[doff + i + 1] * 256 +
-                   data[doff + i + 2] * 256 * 256 + data[doff + i +
-                                                         3] * 256 * 256 *
-                   256);
-        printf("\n");
-        // if trackpoints are split into more than one message 1510, do not add xml head again
-        if (previoustrack_id != track_id) {
-            // close previous file if it is not the first track to be downloaded
-            if (previoustrack_id > -1) {
-                // add xml footer and close file, the next file will be open further down
-                print_tcx_footer(tcxfile);
-                fclose(tcxfile);
-            }
-            // use first lap starttime as filename
-            lap =
-                firstlap_id_track[track_id - firsttrack_id] - firstlap_id;
-            if (dbg)
-                printf
-                    ("lap %u track_id %u firsttrack_id %u firstlap_id %u\n",
-                     lap, track_id, firsttrack_id, firstlap_id);
-            tv_lap =
-                lapbuf[lap][4] + lapbuf[lap][5] * 256 +
-                lapbuf[lap][6] * 256 * 256 +
-                lapbuf[lap][7] * 256 * 256 * 256;
-            ttv = tv_lap + 631065600;   // garmin epoch offset
-            strftime(tbuf, sizeof tbuf, "%d.%m.%Y %H%M%S.TCX",
-                     localtime(&ttv));
-            // open file and start with header of xml file
-            tcxfile = fopen(tbuf, "wt");
-            print_tcx_header(tcxfile);
-        }
-        for (i = 4; i < pktlen; i += 24) {
-            tv = (data[doff + i + 8] + data[doff + i + 9] * 256 +
-                  data[doff + i + 10] * 256 * 256 + data[doff + i +
-                                                         11] * 256 * 256 *
-                  256);
-            tv_lap =
-                lapbuf[lap][4] + lapbuf[lap][5] * 256 +
-                lapbuf[lap][6] * 256 * 256 +
-                lapbuf[lap][7] * 256 * 256 * 256;
-            if ((tv > tv_lap
-                 || (tv == tv_lap
-                     && lap ==
-                     (firstlap_id_track[track_id - firsttrack_id] -
-                      firstlap_id))) && lap <= lastlap) {
-                ttv = tv_lap + 631065600;       // garmin epoch offset
-                strftime(tbuf, sizeof tbuf, "%Y-%m-%dT%H:%M:%SZ",
-                         gmtime(&ttv));
-                tsec =
-                    (lapbuf[lap][8] + lapbuf[lap][9] * 256 +
-                     lapbuf[lap][10] * 256 * 256 +
-                     lapbuf[lap][11] * 256 * 256 * 256);
-                memcpy((void *) &dist, &lapbuf[lap][12], 4);
-                memcpy((void *) &max_speed, &lapbuf[lap][16], 4);
-                cal = lapbuf[lap][36] + lapbuf[lap][37] * 256;
-                hr_av = lapbuf[lap][38];
-                hr_max = lapbuf[lap][39];
-                cad = lapbuf[lap][41];
-                if (lap ==
-                    firstlap_id_track[track_id - firsttrack_id] -
-                    firstlap_id) {
-                    fprintf(tcxfile, "    <Activity Sport=\"");
-                    switch (sporttyp_track[track_id - firsttrack_id]) {
-                    case 0:
-                        fprintf(tcxfile, "Running");
-                        break;
-                    case 1:
-                        fprintf(tcxfile, "Biking");
-                        break;
-                    case 2:
-                        fprintf(tcxfile, "Other");
-                        break;
-                    default:
-                        fprintf(tcxfile, "unknown value: %d",
-                                sporttyp_track[track_id - firsttrack_id]);
-                    }
-                    fprintf(tcxfile, "\">\n");
-                    fprintf(tcxfile, "      <Id>%s</Id>\n", tbuf);
-                } else {
-                    fprintf(tcxfile, "        </Track>\n");
-                    fprintf(tcxfile, "      </Lap>\n");
-                }
-                fprintf(tcxfile, "      <Lap StartTime=\"%s\">\n", tbuf);
-                fprintf(tcxfile,
-                        "        <TotalTimeSeconds>%s</TotalTimeSeconds>\n",
-                        ground(tsec / 100));
-                fprintf(tcxfile,
-                        "        <DistanceMeters>%s</DistanceMeters>\n",
-                        ground(dist));
-                fprintf(tcxfile,
-                        "        <MaximumSpeed>%s</MaximumSpeed>\n",
-                        ground(max_speed));
-                fprintf(tcxfile, "        <Calories>%d</Calories>\n", cal);
-                if (hr_av > 0) {
-                    fprintf(tcxfile,
-                            "        <AverageHeartRateBpm xsi:type=\"HeartRateInBeatsPerMinute_t\">\n");
-                    fprintf(tcxfile, "          <Value>%d</Value>\n",
-                            hr_av);
-                    fprintf(tcxfile, "        </AverageHeartRateBpm>\n");
-                }
-                if (hr_max > 0) {
-                    fprintf(tcxfile,
-                            "        <MaximumHeartRateBpm xsi:type=\"HeartRateInBeatsPerMinute_t\">\n");
-                    fprintf(tcxfile, "          <Value>%d</Value>\n",
-                            hr_max);
-                    fprintf(tcxfile, "        </MaximumHeartRateBpm>\n");
-                }
-                fprintf(tcxfile, "        <Intensity>");
-                switch (lapbuf[lap][40]) {
-                case 0:
-                    fprintf(tcxfile, "Active");
-                    break;
-                case 1:
-                    fprintf(tcxfile, "Rest");
-                    break;
-                default:
-                    fprintf(tcxfile, "unknown value: %d", lapbuf[lap][40]);
-                }
-                fprintf(tcxfile, "</Intensity>\n");
-                if (cad != 255) {
-                    if (sporttyp_track[track_id - firsttrack_id] == 0) {
-                        fprintf(tcxfile,
-                                "        <RunCadence>%d</RunCadence>\n",
-                                cad);
-                    } else {
-                        fprintf(tcxfile, "        <Cadence>%d</Cadence>\n",
-                                cad);
-                    }
-                }
-                fprintf(tcxfile, "        <TriggerMethod>");
-                switch (lapbuf[lap][42]) {
-                case 4:
-                    fprintf(tcxfile, "Heartrate");
-                    break;
-                case 3:
-                    fprintf(tcxfile, "Time");
-                    break;
-                case 2:
-                    fprintf(tcxfile, "Location");
-                    break;
-                case 1:
-                    fprintf(tcxfile, "Distance");
-                    break;
-                case 0:
-                    fprintf(tcxfile, "Manual");
-                    break;
-                default:
-                    fprintf(tcxfile, "unknown value: %d", lapbuf[lap][42]);
-                }
-                fprintf(tcxfile, "</TriggerMethod>\n");
-                fprintf(tcxfile, "        <Track>\n");
-                lap++;
-                track_pause = 0;
-                // if the previous trackpoint has same second as lap time display the trackpoint again
-                if (dbg)
-                    printf("i %u tv %d tv_lap %d tv_previous %d\n", i, tv,
-                           tv_lap, tv_previous);
-                if (tv_previous == tv_lap) {
-                    i -= 24;
-                    tv = tv_previous;
-                }
-            }                   // end of if (tv >= tv_lap && lap <= lastlap)
-            if (track_pause) {
-                fprintf(tcxfile, "        </Track>\n");
-                fprintf(tcxfile, "        <Track>\n");
-                track_pause = 0;
-                if (dbg)
-                    printf("track pause (stop and go)\n");
-            }
-            ttv = tv + 631065600;       // garmin epoch offset
-            tmp = gmtime(&ttv);
-            strftime(tbuf, sizeof tbuf, "%Y-%m-%dT%H:%M:%SZ", tmp);     // format for printing
-            memcpy((void *) &alt, data + doff + i + 12, 4);
-            memcpy((void *) &dist, data + doff + i + 16, 4);
-            lat = (data[doff + i] + data[doff + i + 1] * 256 +
-                   data[doff + i + 2] * 256 * 256 + data[doff + i +
-                                                         3] * 256 * 256 *
-                   256) * 180.0 / 0x80000000;
-            lon =
-                (data[doff + i + 4] + data[doff + i + 5] * 256 +
-                 data[doff + i + 6] * 256 * 256 + data[doff + i +
-                                                       7] * 256 * 256 *
-                 256) * 180.0 / 0x80000000;
-            hr = data[doff + i + 20];
-            cad = data[doff + i + 21];
-            u1 = data[doff + i + 22];
-            u2 = data[doff + i + 23];
-            if (dbg)
-                printf
-                    ("lat %.10g lon %.10g hr %d cad %d u1 %d u2 %d tv %d %s alt %f dist %f %02x %02x%02x%02x%02x\n",
-                     lat, lon, hr, cad, u1, u2, tv, tbuf, alt, dist,
-                     data[doff + i + 3], data[doff + i + 16],
-                     data[doff + i + 17], data[doff + i + 18],
-                     data[doff + i + 19]);
-            fprintf(tcxfile, "          <Trackpoint>\n");
-            fprintf(tcxfile, "            <Time>%s</Time>\n", tbuf);
-            if (lat < 90) {
-                fprintf(tcxfile, "            <Position>\n");
-                fprintf(tcxfile,
-                        "              <LatitudeDegrees>%s</LatitudeDegrees>\n",
-                        ground(lat));
-                fprintf(tcxfile,
-                        "              <LongitudeDegrees>%s</LongitudeDegrees>\n",
-                        ground(lon));
-                fprintf(tcxfile, "            </Position>\n");
-                fprintf(tcxfile,
-                        "            <AltitudeMeters>%s</AltitudeMeters>\n",
-                        ground(alt));
-            }
-            // last trackpoint has utopic distance, 40000km should be enough, hack?
-            if (dist < (float) 40000000) {
-                fprintf(tcxfile,
-                        "            <DistanceMeters>%s</DistanceMeters>\n",
-                        ground(dist));
-            }
-            if (hr > 0) {
-                fprintf(tcxfile,
-                        "            <HeartRateBpm xsi:type=\"HeartRateInBeatsPerMinute_t\">\n");
-                fprintf(tcxfile, "              <Value>%d</Value>\n", hr);
-                fprintf(tcxfile, "            </HeartRateBpm>\n");
-            }
-            if (u1 > 0 && cad != 255) {
-                fprintf(tcxfile, "            <Cadence>%d</Cadence>\n",
-                        cad);
-            }
-            if (dist < (float) 40000000) {
-                fprintf(tcxfile,
-                        "            <SensorState>%s</SensorState>\n",
-                        u1 ? "Present" : "Absent");
-                fprintf(tcxfile, "            <Extensions>\n");
-                fprintf(tcxfile,
-                        "              <TPX xmlns=\"http://www.garmin.com/xmlschemas/ActivityExtension/v2\" CadenceSensor=\"");
-                // get type of pod from data, could not figure it out, so using sporttyp of first track
-                switch (sporttyp_track[track_id - firsttrack_id]) {
-                case 1:
-                    fprintf(tcxfile, "Bike\"");
-                    break;
-                case 0:
-                default:
-                    fprintf(tcxfile, "Footpod\"");
-                    break;
-                }
-                if (u1 == 0 && cad != 255) {
-                    fprintf(tcxfile, ">\n");
-                    fprintf(tcxfile,
-                            "                <RunCadence>%d</RunCadence>\n",
-                            cad);
-                    fprintf(tcxfile, "              </TPX>\n");
-                } else {
-                    fprintf(tcxfile, "/>\n");
-                }
-                fprintf(tcxfile, "            </Extensions>\n");
-            } else {
-                // maybe if we recieve utopic position and distance this tells pause in the run (stop and go)
-                if (track_pause == 0)
-                    track_pause = 1;
-                else
-                    track_pause = 0;
-            }
-            fprintf(tcxfile, "          </Trackpoint>\n");
-            tv_previous = tv;
-        }                       // end of for (i = 4; i < pktlen; i += 24)
-        previoustrack_id = track_id;
-        break;
-    case 149:
-        printf("%d Lap data id: %u %u\n", pkttype,
-               data[doff] + data[doff + 1] * 256,
-               data[doff + 2] + data[doff + 3] * 256);
-        if (lap < MAXLAPS) {
-            memcpy((void *) &lapbuf[lap][0], data + doff, 48);
-            lastlap = lap;
-            lap++;
-        }
-        break;
+    default:
+        generic_decode(bloblen, pkttype, pktlen, dsize, data);
+    }
+}
+
+void
+software_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+                int dsize, uchar * data)
+{
+    int doff = 20;
+    printf("software decode %d %d %d %d\n", bloblen, pkttype, pktlen,
+           dsize);
+
+    // any response here allows us to move forward.
+    if (nacksent > nlastcompletedcmd) {
+        printf("completed command %d %d\n", nacksent, nlastcompletedcmd);
+        nlastcompletedcmd = nacksent;
+    }
+
+    switch (pkttype) {
     case 247:
         memset(modelname, 0, sizeof modelname);
         memcpy(modelname, data + doff + 88, dsize - 88);
         printf("%d Device name %s\n", pkttype, modelname);
         break;
     default:
-        printf("don't know how to decode packet type %d\n", pkttype);
-        for (i = doff; i < dsize && i < doff + pktlen; i++)
-            printf("%02x", data[i]);
-        printf("\n");
-        for (i = doff; i < dsize && i < doff + pktlen; i++)
-            if (isprint(data[i]))
-                printf("%c", data[i]);
-            else
-                printf(".");
-        printf("\n");
+        generic_decode(bloblen, pkttype, pktlen, dsize, data);
     }
 }
+
+void
+unknown_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+               int dsize, uchar * data)
+{
+    // this method is a catch all for the cmds that we don't know how to
+    // interpret the results of.
+    int doff = 20;
+    int i = 0;
+    printf("unknown decode %d %d %d %d\n", bloblen, pkttype, pktlen,
+           dsize);
+
+    // any response here allows us to move forward.
+    if (nacksent > nlastcompletedcmd) {
+        printf("completed command %d %d\n", nacksent, nlastcompletedcmd);
+        nlastcompletedcmd = nacksent;
+    }
+
+    switch (pkttype) {
+    case 1523:
+    case 994:
+    case 1066:
+        printf("%d ints?", pkttype);
+        for (i = 0; i < pktlen; i += 4)
+            printf(" %u", antuint(data, doff + i));
+        printf("\n");
+        break;
+    default:
+        generic_decode(bloblen, pkttype, pktlen, dsize, data);
+    }
+}
+
+void
+laps_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+            int dsize, uchar * data)
+{
+    int doff = 20;
+    int lap = -1;
+    int i = 0;
+    int found_laps = 0;
+    printf("laps decode %d %d %d %d\n", bloblen, pkttype, pktlen, dsize);
+    switch (pkttype) {
+    case 12:
+        printf("%d xfer complete", pkttype);
+
+        for (i = 0; i < pktlen; i += 2)
+            printf(" %u", antshort(data, doff + i));
+        printf("\n");
+        // don't know what to do with the code here
+        // antshort(data, doff);
+
+        // make sure we got all the laps.
+        for (i = 0; i < MAXLAPS; i++) {
+            if (lapbuf[i].lapnum != -1) {
+                //        if (dbg) {
+                //          printlap(&lapbuf[i]);
+                //        }
+                found_laps++;
+            }
+        }
+        if (nlaps == found_laps) {
+            printf("All laps received (%d).\n", found_laps);
+
+            // only allow completion if we get packet type 12 and have all the laps.
+            if (nacksent > nlastcompletedcmd) {
+                printf("completed command %d %d\n", nacksent,
+                       nlastcompletedcmd);
+                nlastcompletedcmd = nacksent;
+            }
+        } else {
+            printf("Not all laps received; only got %d/%d. Will retry.\n",
+                   found_laps, nlaps);
+        }
+        break;
+    case 27:
+        nlaps = antshort(data, doff);
+        printf("%d laps %u\n", pkttype, nlaps);
+        break;
+    case 149:
+        printf("%d Lap data id: %u %u\n", pkttype,
+               antshort(data, doff), antshort(data, doff + 2));
+        lap = antshort(data, doff);
+        if (lap < 0) {
+            printf("Bad lap specified %d.\n", lap);
+            exit(1);
+        } else if (lap < MAXLAPS) {
+            decodelap(&lapbuf[lap], lap, data + doff);
+        } else {
+            printf("Not enough laps.");
+            exit(1);
+        }
+
+        break;
+    default:
+        generic_decode(bloblen, pkttype, pktlen, dsize, data);
+    }
+}
+
+void
+activities_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+                  int dsize, uchar * data)
+{
+    int doff = 20;
+    int i = 0;
+    int activity = 0;
+    int found_activities = 0;
+    printf("activities decode %d %d %d %d\n", bloblen, pkttype, pktlen,
+           dsize);
+    switch (pkttype) {
+    case 12:
+        printf("%d xfer complete", pkttype);
+
+        for (i = 0; i < pktlen; i += 2)
+            printf(" %u", antshort(data, doff + i));
+        printf("\n");
+
+        // don't know what to do with the code here
+        // antshort(data, doff);
+
+        // make sure we got all the activites.
+        for (i = 0; i < MAXACTIVITIES; i++) {
+            if (activitybuf[i].activitynum != -1) {
+                //        if (dbg) {
+                //          printactivity(&activitybuf[i]);
+                //        }
+                found_activities++;
+            }
+        }
+        if ((nactivities - nsummarized_activities) == found_activities) {
+            printf
+                ("All activities received (%d complete, %d summarized).\n",
+                 found_activities, nsummarized_activities);
+
+            // only allow completion if we get packet type 12.
+            if (nacksent > nlastcompletedcmd) {
+                printf("completed command %d %d\n", nacksent,
+                       nlastcompletedcmd);
+                nlastcompletedcmd = nacksent;
+            }
+        } else {
+            printf
+                ("Not all activities received; got %d/%d (%d summarized). Will retry.\n",
+                 found_activities, nactivities, nsummarized_activities);
+        }
+        break;
+    case 27:
+        nactivities = antshort(data, doff);
+        nsummarized_activities = 0;
+        printf("%d activities %u\n", pkttype, nactivities);
+        break;
+    case 990:
+        printf("%d activity %u lap %u-%u sport %u\n", pkttype,
+               antshort(data, doff), antshort(data, doff + 2),
+               antshort(data, doff + 4), data[doff + 6]);
+        printf("%d shorts?", pkttype);
+        for (i = 0; i < pktlen; i += 2)
+            printf(" %u", antshort(data, doff + i));
+        printf("\n");
+        activity = antshort(data, doff);
+        // summarized activites (all trackpoints have been thrown away) are
+        // represented as activities with -1 activitynums.
+        if (activity < 0) {
+            printf("Summarized activity specified (%d), ignoring.\n",
+                   activity);
+            nsummarized_activities++;
+        } else if (activity < MAXACTIVITIES) {
+            decodeactivity(&activitybuf[activity], activity, &data[doff]);
+        } else {
+            printf("Not enough activities.");
+            exit(1);
+        }
+        break;
+    default:
+        generic_decode(bloblen, pkttype, pktlen, dsize, data);
+    }
+}
+
+
+void
+trackpoints_decode(ushort bloblen, ushort pkttype, ushort pktlen,
+                   int dsize, uchar * data)
+{
+    int doff = 20;
+    int i = 0;
+    //int j = 0;
+    int found_trackpoints = 0;
+    printf("trackpoints decode %d %d %d %d\n", bloblen, pkttype, pktlen,
+           dsize);
+    switch (pkttype) {
+    case 12:
+        printf("%d xfer complete", pkttype);
+
+        for (i = 0; i < pktlen; i += 2)
+            printf(" %u", antshort(data, doff + i));
+        printf("\n");
+        // don't know what to do with the code here
+        // antshort(data, doff);
+
+        // make sure we got all the trackpoints.
+        for (i = 0; i < MAXACTIVITIES; i++) {
+            found_trackpoints += ntrackpoints[i];
+            if (ntrackpoints[i] > 0) {
+                printf("%d trackpoints for activity %d\n", ntrackpoints[i],
+                       i);
+                //        int j = 0;
+                //        for (j = 0 ; j < ntrackpoints[i] ; j++) {
+                //          if (dbg) {
+                //            printtrackpoint(&trackpointbuf[i][j]);
+                //          }
+                //}
+            }
+        }
+
+        if (ntotal_trackpoints == (found_trackpoints +
+                                   (nactivities -
+                                    nsummarized_activities))) {
+            printf("All trackpoints received (%d).\n", found_trackpoints);
+
+            // only allow completion if we get packet type 12 and have all
+            // trackpoints.
+            if (nacksent > nlastcompletedcmd) {
+                printf("completed command %d %d\n", nacksent,
+                       nlastcompletedcmd);
+                nlastcompletedcmd = nacksent;
+            }
+        } else {
+            printf
+                ("Not all trackpoints received; got %d/%d. Will retry.\n",
+                 found_trackpoints, ntotal_trackpoints);
+        }
+        break;
+        // trackpoints are given as a run of trackpoints per activity; they'll
+        // give us a 99 to switch activities.
+    case 99:
+        printf("%d trackindex %u\n", pkttype, antshort(data, doff));
+        printf("%d shorts?", pkttype);
+        for (i = 0; i < pktlen; i += 2)
+            printf(" %u", antshort(data, doff + i));
+        printf("\n");
+        current_trackpoint_activity = antshort(data, doff);
+        break;
+    case 27:
+        ntotal_trackpoints = antshort(data, doff);
+        printf("%d trackpoints %u\n", pkttype, ntotal_trackpoints);
+        int i = 0;
+        for (i = 0; i < MAXACTIVITIES; i++) {
+            ntrackpoints[i] = 0;
+            free(trackpointbuf[i]);
+            trackpointbuf[i] = NULL;
+        }
+        current_trackpoint_activity = -1;
+        break;
+    case 1510:
+        printf("%d trackpoints", pkttype);
+        for (i = 0; i < 4 && i < pktlen; i += 4)
+            printf(" %u", antuint(data, doff + i));
+        printf("\n");
+        for (i = 4; i < pktlen; i += 24) {
+            // we should probably clean up this memory at some point.
+            ntrackpoints[current_trackpoint_activity]++;
+            trackpointbuf[current_trackpoint_activity] = (trackpoint_t *)
+                realloc(trackpointbuf[current_trackpoint_activity],
+                        sizeof(trackpoint_t) *
+                        ntrackpoints[current_trackpoint_activity]);
+
+            if (!trackpointbuf[current_trackpoint_activity]) {
+                printf("Unable to allocate trackpoint buffer.\n");
+                exit(1);
+            }
+
+            trackpoint_t *ptrackpoint =
+                &trackpointbuf[current_trackpoint_activity][ntrackpoints
+                                                            [current_trackpoint_activity]
+                                                            - 1];
+            decodetrackpoint(ptrackpoint, &data[doff + i]);
+
+        }
+        break;
+    default:
+        generic_decode(bloblen, pkttype, pktlen, dsize, data);
+    }
+}
+
 
 void
 usage(void)
@@ -714,8 +1245,6 @@ usage(void)
 uchar
 chevent(uchar chan, uchar event)
 {
-    uchar seq;
-    uchar last;
     uchar status;
     uchar phase;
     uint newdata;
@@ -733,9 +1262,7 @@ chevent(uchar chan, uchar event)
         newdata = cbuf[1] & 0x20;
         phase = cbuf[2];
     }
-    cid =
-        cbuf[4] + cbuf[5] * 256 + cbuf[6] * 256 * 256 +
-        cbuf[7] * 256 * 256 * 256;
+    cid = antuint(cbuf, 4);
     memcpy((void *) &id, cbuf + 4, 4);
 
     if (dbg)
@@ -769,7 +1296,7 @@ chevent(uchar chan, uchar event)
                 fprintf(stderr, "%s BC0 %02x %d %d %d PID %d %d %d %c%c\n",
                         timestamp(),
                         cbuf[0], cbuf[1] & 0xd7, cbuf[2], cbuf[3],
-                        cbuf[4] + cbuf[5] * 256, cbuf[6], cbuf[7],
+                        antshort(cbuf, 4), cbuf[6], cbuf[7],
                         (cbuf[1] & 0x20) ? 'N' : ' ',
                         (cbuf[1] & 0x08) ? 'P' : ' ');
                 break;
@@ -783,7 +1310,7 @@ chevent(uchar chan, uchar event)
                 fprintf(stderr, "%s BCX %02x %d %d %d PID %d %d %d %c%c\n",
                         timestamp(),
                         cbuf[0], cbuf[1] & 0xd7, cbuf[2], cbuf[3],
-                        cbuf[4] + cbuf[5] * 256, cbuf[6], cbuf[7],
+                        antshort(cbuf, 4), cbuf[6], cbuf[7],
                         (cbuf[1] & 0x20) ? 'N' : ' ',
                         (cbuf[1] & 0x08) ? 'P' : ' ');
             default:
@@ -823,11 +1350,6 @@ chevent(uchar chan, uchar event)
                 ANT_SetChannelSearchTimeout(chan, 3);
                 ANT_SetChannelRFFreq(chan, newfreq);
                 newfreq = 0;
-            }
-            // phase 0 seen after reset at end of download
-            if (downloadfinished) {
-                fprintf(stderr, "finished\n");
-                exit(0);
             }
             // generate a random id if pairing and user didn't specify one
             if (pairing && !myid) {
@@ -922,28 +1444,6 @@ chevent(uchar chan, uchar event)
             break;
         case 2:
             // successfully authenticated
-            if (!downloadstarted) {
-                downloadstarted = 1;
-                if (dbg)
-                    printf("starting download\n");
-                ack.code = 0x44;
-                ack.atype = 6;
-                ack.c1 = 0x01;
-                ack.c2 = 0x00;
-                ack.id = 0;
-                //ANT_SendAcknowledgedData(chan, (void *)&ack); // tell garmin to start upload
-            }
-            if (downloadfinished) {
-                if (dbg)
-                    printf("finished download\n");
-                ack.code = 0x44;
-                ack.atype = 3;
-                ack.c1 = 0x00;
-                ack.c2 = 0x00;
-                ack.id = 0;
-                if (!passive)
-                    ANT_SendAcknowledgedData(chan, (void *) &ack);      // tell garmin we're finished
-            }
             break;
         case 3:
             if (pairing) {
@@ -976,7 +1476,7 @@ chevent(uchar chan, uchar event)
             printf("rxfake burst pairing %d blast %ld waitauth %d\n",
                    pairing, (long) blast, waitauth);
         blsize = *(int *) (cbuf + 4);
-        memcpy(&blast, cbuf + 8, 4);
+        memcpy(&blast, cbuf + 4 + sizeof(int), sizeof(uchar *));
         if (dbg) {
             printf("fake burst %d %lx ", blsize, (long) blast);
             for (i = 0; i < blsize && i < 64; i++)
@@ -990,49 +1490,65 @@ chevent(uchar chan, uchar event)
             printf("\n");
         }
         if (sentauth) {
-            static int nacksent = 0;
             char *ackdata;
-            static uchar ackpkt[100];
             // ack the last packet
             ushort bloblen = blast[14] + 256 * blast[15];
             ushort pkttype = blast[16] + 256 * blast[17];
             ushort pktlen = blast[18] + 256 * blast[19];
+            if (dbg)
+                printf("bloblen %d, nacksent %d nlastcompleted %d\n",
+                       bloblen, nacksent, nlastcompletedcmd);
             if (bloblen == 0) {
-                if (dbg)
-                    printf("bloblen %d, get next data\n", bloblen);
-                // request next set of data
-                ackdata = acks[nacksent++];
-                if (!strcmp(ackdata, "")) {     // finished
-                    printf("acks finished, resetting\n");
-                    ack.code = 0x44;
-                    ack.atype = 3;
-                    ack.c1 = 0x00;
-                    ack.c2 = 0x00;
-                    ack.id = 0;
-                    ANT_SendAcknowledgedData(chan, (void *) &ack);      // go to idle
-                    sleep(1);
-                    exit(1);
+                if ((nacksent == 0) || (nacksent <= nlastcompletedcmd)) {
+                    if (dbg)
+                        printf("bloblen %d, get next data\n", bloblen);
+                    // request next set of data
+                    ackdata = cmds[nacksent].cmd;
+                    nacksent++;
+                    printf("Advancing to command %d\n", nacksent);
+                    if (!strcmp(ackdata, "")) { // finished
+                        printf("cmds finished, resetting\n");
+                        ack.code = 0x44;
+                        ack.atype = 3;
+                        ack.c1 = 0x00;
+                        ack.c2 = 0x00;
+                        ack.id = 0;
+                        ANT_SendAcknowledgedData(chan, (void *) &ack);  // go to idle
+
+                        write_output_files();
+                        sleep(1);
+                        exit(1);
+                    }
+                } else {
+                    printf("Got 0 before complete; reacking %d\n",
+                           nacksent);
+                    ackdata = cmds[nacksent - 1].cmd;
                 }
                 if (dbg)
                     printf("got type 0, sending ack %s\n", ackdata);
-                sprintf(ackpkt, "440dffff00000000%s", ackdata);
+                sprintf((char *) ackpkt, "440dffff00000000%s", ackdata);
+
             } else if (bloblen == 65535) {
                 // repeat last ack
                 if (dbg)
                     printf("repeating ack %s\n", ackpkt);
-                ANT_SendBurstTransferA(chan, ackpkt, strlen(ackpkt) / 16);
+                ANT_SendBurstTransferA(chan, ackpkt,
+                                       strlen((char *) ackpkt) / 16);
             } else {
                 if (dbg)
                     printf("non-0 bloblen %d\n", bloblen);
-                decode(bloblen, pkttype, pktlen, blsize, blast);
-                sprintf(ackpkt, "440dffff0000000006000200%02x%02x0000",
+                (*cmds[nacksent - 1].decode_fn) (bloblen, pkttype, pktlen,
+                                                 blsize, blast);
+                sprintf((char *) ackpkt,
+                        "440dffff0000000006000200%02x%02x0000",
                         pkttype % 256, pkttype / 256);
             }
             if (dbg)
                 printf("received pkttype %d len %d\n", pkttype, pktlen);
             if (dbg)
                 printf("acking %s\n", ackpkt);
-            ANT_SendBurstTransferA(chan, ackpkt, strlen(ackpkt) / 16);
+            ANT_SendBurstTransferA(chan, ackpkt,
+                                   strlen((char *) ackpkt) / 16);
         } else if (!nopairing && pairing && blast) {
             memcpy(&peerdev, blast + 12, 4);
             if (dbg)
@@ -1097,7 +1613,6 @@ chevent(uchar chan, uchar event)
             gotwatchid = 1;
             // garmin sending authentication/identification data
             if (!once) {
-                int i;
                 once = 1;
                 if (dbg)
                     fprintf(stderr, "id data: ");
@@ -1115,72 +1630,8 @@ chevent(uchar chan, uchar event)
                         peerdev, mydev);
                 exit(1);
             }
-        } else if (lastphase == 2) {
-            int nw;
-            static int once = 0;
-            printf("once %d\n", once);
-            // garmin uploading in response to sendack3
-            // in this state we're receiving the workout data
-            if (!once) {
-                printf("receiving\n");
-                once = 1;
-                outfd = open(fn, O_WRONLY | O_CREAT, 0644);
-                if (outfd < 0) {
-                    perror(fn);
-                    exit(1);
-                }
-            }
-            if (last) {
-                nw = write(outfd, blast, blsize);
-                if (nw != blsize) {
-                    fprintf(stderr, "data write failed fd %d %d\n", outfd,
-                            nw);
-                    perror("write");
-                    exit(1);
-                }
-                close(outfd);
-                downloadfinished = 1;
-            }
-        } else if (0 && last) {
-            if (dbg) {
-                fprintf(stderr, "auth response: ");
-                for (i = 0; i < blsize; i++)
-                    fprintf(stderr, "%02x", cbuf[i]);
-                fprintf(stderr, "\n");
-            }
-            if (blast[10] == 2) {
-                fprintf(stderr, "authentication failed\n");
-                exit(1);
-            }
-        } else if (last) {
-            fprintf(stderr, "data in state xx: ");
-            int i;
-            for (i = 0; i < blsize; i++)
-                fprintf(stderr, "%02x", blast[i]);
-            fprintf(stderr, "\n");
-            sentcmd = 1000;
-            switch (sentcmd) {
-            case 1000:
-                break;
-            case 0:
-                sentcmd++;
-                //ANT_SendBurstTransferA(chan, getgpsver, strlen(getgpsver)/16);
-                break;
-            case 999:
-                printf("finished\n");
-                exit(1);
-            default:
-                sleep(1);
-                sentcmd = 1;
-                //printf("sending command %d %s\n", sentcmd-1, cmds[sentcmd-1]);
-                //ANT_SendBurstTransferA(chan, cmds[sentcmd-1],
-                //      strlen(cmds[sentcmd-1])/16);
-                sentcmd++;
-                //if(!strcmp(cmds[sentcmd-1], "END"))
-                //      sentcmd = 999;
-                break;
-            }
         }
+
         if (dbg)
             printf("continuing after burst\n");
         break;
@@ -1191,7 +1642,6 @@ chevent(uchar chan, uchar event)
 uchar
 revent(uchar chan, uchar event)
 {
-    struct ack_msg ack;
     int i;
 
     if (dbg)
@@ -1219,7 +1669,7 @@ revent(uchar chan, uchar event)
         }
         break;
     case MESG_CHANNEL_ID_ID:
-        devid = ebuf[1] + ebuf[2] * 256;
+        devid = antshort(ebuf, 1);
         if (mydev == 0 || devid == mydev % 65536) {
             if (dbg)
                 printf("devid %08x myid %08x\n", devid, myid);
@@ -1249,6 +1699,11 @@ revent(uchar chan, uchar event)
     case EVENT_RX_FAIL:
         // ignore this
         break;
+        // TODO: something better.
+    case 6:                    // EVENT_TRANSFER_TX_FAILED
+        printf("Reacking: %02x %s\n", chan, ackpkt);
+        ANT_SendBurstTransferA(chan, ackpkt, strlen((char *) ackpkt) / 16);
+        break;
     default:
         printf("Unhandled response event %02x\n", event);
         break;
@@ -1256,6 +1711,7 @@ revent(uchar chan, uchar event)
     return 1;
 }
 
+int
 main(int ac, char *av[])
 {
     int devnum = 0;
@@ -1279,16 +1735,13 @@ main(int ac, char *av[])
             sprintf(authfile, "%s/.gant", getenv("HOME"));
     }
     progname = av[0];
-    while ((c = getopt(ac, av, "a:o:d:i:m:PpvDrnzf:")) != -1) {
+    while ((c = getopt(ac, av, "a:d:i:m:vDrnzf:")) != -1) {
         switch (c) {
         case 'a':
             authfile = optarg;
             break;
         case 'f':
             fname = optarg;
-            break;
-        case 'o':
-            fn = optarg;
             break;
         case 'd':
             devnum = atoi(optarg);
@@ -1298,13 +1751,6 @@ main(int ac, char *av[])
             break;
         case 'm':
             mydev = atoi(optarg);
-            break;
-        case 'p':
-            passive = 1;
-            semipassive = 0;
-            break;
-        case 'P':
-            passive = 1;
             break;
         case 'v':
             verbose = 1;
@@ -1330,7 +1776,25 @@ main(int ac, char *av[])
     ac -= optind;
     av += optind;
 
-    if ((!passive && !authfile) || ac)
+    int i = 0;
+    for (i = 0; i < MAXACTIVITIES; i++) {
+        memset(&activitybuf[i], 0, sizeof(activity_t));
+        activitybuf[i].activitynum = -1;
+
+        ntrackpoints[i] = 0;
+        trackpointbuf[i] = NULL;
+    }
+    nactivities = 0;
+    nsummarized_activities = 0;
+    ntotal_trackpoints = 0;
+
+    for (i = 0; i < MAXLAPS; i++) {
+        memset(&lapbuf[i], 0, sizeof(lap_t));
+        lapbuf[i].lapnum = -1;
+    }
+    nlaps = 0;
+
+    if ((!authfile) || ac)
         usage();
 
     if (!ANT_Init(devnum, 0)) { // should be 115200 but doesn't fit into a short

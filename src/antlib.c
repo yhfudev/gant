@@ -31,7 +31,6 @@
 static int fd = -1;
 static int dbg = 0;
 static pthread_t commthread;;
-static int commenabled = 1;
 
 static RESPONSE_FUNC rfn = 0;
 static uchar *rbufp;
@@ -70,6 +69,13 @@ msg_send(uchar mesg, uchar * inbuf, uchar len)
         if (dbg) {
             perror("failed write");
         }
+    } else if (dbg == 2) {
+        // Wali: additional raw data output
+        printf(">>>\n    00000000:");
+        for (i = 0; i < (len + 4); i++) {
+            printf(" %02x", buf[i]);
+        }
+        putchar('\n');
     }
     return 1;
 }
@@ -95,27 +101,7 @@ msg_send3(uchar mesg, uchar data1, uchar data2, uchar data3)
     return msg_send(mesg, buf, 3);
 }
 
-void *
-commfn(void *arg)
-{
-    fd_set readfds, writefds, exceptfds;
-    int ready;
-    struct timeval to;
-
-    for (;;) {
-        FD_ZERO(&readfds);
-        FD_ZERO(&writefds);
-        FD_ZERO(&exceptfds);
-        FD_SET(fd, &readfds);
-        to.tv_sec = 1;
-        to.tv_usec = 0;
-        ready = select(fd + 1, &readfds, &writefds, &exceptfds, &to);
-        if (ready) {
-            get_data(fd);
-        }
-    }
-}
-
+void
 get_data(int fd)
 {
     static uchar buf[500];
@@ -145,6 +131,13 @@ get_data(int fd)
             fprintf(stderr, "%02x", buf[j]);
         fprintf(stderr, "\n");
         exit(1);
+    } else if (dbg == 2) {
+        // Wali: additional raw data output
+        printf("<<<\n    00000000:");
+        for (i = 0; i < bufc; i++) {
+            printf(" %02x", buf[i]);
+        }
+        putchar('\n');
     }
     // some data in buf
     // search for possible valid messages
@@ -266,7 +259,7 @@ get_data(int fd)
                                 bused[chan] = 8;
                                 lseq[chan] = seq;
                                 fprintf(stderr, "reinit ch# %d %d\n", chan,
-                                        lseq);
+                                        lseq[chan]);
                             }
                         } else {
                             if ((bused[chan] % BSIZE) == 0) {
@@ -294,7 +287,8 @@ get_data(int fd)
                         blast = burstbuf[chan];
                         blsize = bused[chan];
                         if (dbg)
-                            fprintf(stderr, "BU %d %lx\n", blsize, blast);
+                            fprintf(stderr, "BU %d %lx\n", blsize,
+                                    (long) blast);
                         if (dbg) {
                             fprintf(stderr, "bused ch# %d %d\n", chan,
                                     bused[chan]);
@@ -351,7 +345,7 @@ get_data(int fd)
                     memcpy(cbufp, buf + i + 4, dlen);
                     if (dbg) {
                         fprintf(stderr, "xch0#%d %d %lx\n", chan, blsize,
-                                blast);
+                                (long) blast);
                         for (j = 0; j < blsize; j++)
                             fprintf(stderr, "%02x", *(blast + j));
                         fprintf(stderr, "\n");
@@ -359,7 +353,7 @@ get_data(int fd)
                     (*cfn) (chan, event);
                     if (dbg) {
                         fprintf(stderr, "xch1#%d %d %lx\n", chan, blsize,
-                                blast);
+                                (long) blast);
                         for (j = 0; j < blsize; j++)
                             fprintf(stderr, "%02x", *(blast + j));
                         fprintf(stderr, "\n");
@@ -368,13 +362,14 @@ get_data(int fd)
                     if (event == EVENT_RX_BURST_PACKET && blast && blsize) {
                         if (dbg) {
                             fprintf(stderr, "Fake burst ch#%d %d %lx\n",
-                                    chan, blsize, blast);
+                                    chan, blsize, (long) blast);
                             for (j = 0; j < blsize; j++)
                                 fprintf(stderr, "%02x", *(blast + j));
                             fprintf(stderr, "\n");
                         }
                         *(int *) (cbufp + 4) = blsize;
-                        memcpy(cbufp + 8, &blast, 4);
+                        memcpy(cbufp + 4 + sizeof(int), &blast,
+                               sizeof(uchar *));
                         (*cfn) (chan, EVENT_RX_FAKE_BURST);
                         free(blast);
                         blast = 0;
@@ -393,6 +388,29 @@ get_data(int fd)
     } else
         bufc = 0;
 }
+
+
+void *
+commfn(void *arg)
+{
+    fd_set readfds, writefds, exceptfds;
+    int ready;
+    struct timeval to;
+
+    for (;;) {
+        FD_ZERO(&readfds);
+        FD_ZERO(&writefds);
+        FD_ZERO(&exceptfds);
+        FD_SET(fd, &readfds);
+        to.tv_sec = 1;
+        to.tv_usec = 0;
+        ready = select(fd + 1, &readfds, &writefds, &exceptfds, &to);
+        if (ready) {
+            get_data(fd);
+        }
+    }
+}
+
 
 uchar
 ANT_ResetSystem(void)
@@ -464,7 +482,7 @@ ANT_SetNetworkKeya(uchar net, uchar * key)
     uchar buf[9];
     int i;
 
-    if (strlen(key) != 16) {
+    if (strlen((char *) key) != 16) {
         fprintf(stderr, "Bad key length %s\n", key);
         return 0;
     }
@@ -478,7 +496,6 @@ uchar
 ANT_SetNetworkKey(uchar net, uchar * key)
 {
     uchar buf[9];
-    int i;
 
     buf[0] = net;
     memcpy(buf + 1, key, 8);
@@ -547,7 +564,7 @@ ANT_SendAcknowledgedDataA(uchar chan, uchar * data)     // ascii version
     uchar buf[9];
     int i;
 
-    if (strlen(data) != 16) {
+    if (strlen((char *) data) != 16) {
         fprintf(stderr, "Bad data length %s\n", data);
         return 0;
     }
@@ -561,7 +578,6 @@ uchar
 ANT_SendAcknowledgedData(uchar chan, uchar * data)
 {
     uchar buf[9];
-    int i;
 
     buf[0] = chan;
     memcpy(buf + 1, data, 8);
@@ -578,7 +594,7 @@ ANT_SendBurstTransferA(uchar chan, uchar * data, ushort numpkts)
 
     if (dbg)
         fprintf(stderr, "numpkts %d data %s\n", numpkts, data);
-    if (strlen(data) != 16 * numpkts) {
+    if (strlen((char *) data) != 16 * numpkts) {
         fprintf(stderr, "Bad data length %s numpkts %d\n", data, numpkts);
         return 0;
     }
@@ -601,7 +617,6 @@ ushort
 ANT_SendBurstTransfer(uchar chan, uchar * data, ushort numpkts)
 {
     uchar buf[9];
-    int i;
     int j;
     int seq = 0;
 
