@@ -436,7 +436,7 @@ ANT_Initf(char *devname, ushort baud)
 {
     struct termios tp;
 
-    fd = open(devname, O_RDWR);
+    fd = open(devname, O_RDWR | O_NDELAY);
     if (fd < 0) {
         perror(devname);
         return 0;
