@@ -16,6 +16,7 @@
 #include <math.h>
 
 #include "antdefs.h"
+#include "antlib.h"
 
 // all version numbering according ant agent for windows 2.2.1
 char *releasetime = "Jul 30 2009, 17:42:56";
@@ -308,12 +309,9 @@ static int nlastcompletedcmd = -1;
 static int nacksent = 0;
 static uchar ackpkt[100];
 
-
-
 int authfd = -1;
 char *authfile;
 char *progname;
-
 
 // blast and bsize are intertwined with the underlying buffers in antlib.c;
 // we should remove these variables and strengthen the interface.
@@ -1213,8 +1211,7 @@ trackpoints_decode(ushort bloblen, ushort pkttype, ushort pktlen,
         for (i = 4; i < pktlen; i += 24) {
             // we should probably clean up this memory at some point.
             ntrackpoints[current_trackpoint_activity]++;
-            trackpointbuf[current_trackpoint_activity] =
-                (trackpoint_t *)
+            trackpointbuf[current_trackpoint_activity] = (trackpoint_t *)
                 realloc(trackpointbuf[current_trackpoint_activity],
                         sizeof(trackpoint_t) *
                         ntrackpoints[current_trackpoint_activity]);
@@ -1826,3 +1823,5 @@ main(int ac, char *av[])
     for (;;)
         sleep(10);
 }
+
+/* vim: set shiftwidth=8 softtabstop=0: */
