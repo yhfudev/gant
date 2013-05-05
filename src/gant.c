@@ -400,7 +400,7 @@ write_tcx_header(FILE * tcxfile)
     fprintf(tcxfile,
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n");
     fprintf(tcxfile,
-            "<TrainingCenterDatabase xmlns=\"http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2 http://www.garmin.com/xmlschemas/TrainingCenterDatabasev2.xsd\">\n\n");
+            "<TrainingCenterDatabase xmlns=\"http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://www.garmin.com/xmlschemas/ActivityExtension/v2 http://www.garmin.com/xmlschemas/ActivityExtensionv2.xsd http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2 http://www.garmin.com/xmlschemas/TrainingCenterDatabasev2.xsd\">\n\n");
     fprintf(tcxfile, "  <Activities>\n");
     return;
 }
@@ -416,7 +416,7 @@ write_tcx_footer(FILE * tcxfile)
     fprintf(tcxfile, "          <VersionMajor>%u</VersionMajor>\n",
             ver / 100);
     fprintf(tcxfile, "          <VersionMinor>%u</VersionMinor>\n",
-            ver - ver / 100 * 100);
+            ver % 100);
     fprintf(tcxfile, "          <BuildMajor>0</BuildMajor>\n");
     fprintf(tcxfile, "          <BuildMinor>0</BuildMinor>\n");
     fprintf(tcxfile, "        </Version>\n");
@@ -556,11 +556,12 @@ write_output_files()
         case 1:
             fprintf(tcxfile, "Biking");
             break;
+        default:
+            fprintf(stderr, "unknown Activity Sport value: %d",
+                    pact->sporttype);
         case 2:
             fprintf(tcxfile, "Other");
             break;
-        default:
-            fprintf(tcxfile, "unknown value: %d", pact->sporttype);
         }
         fprintf(tcxfile, "\">\n");
         fprintf(tcxfile, "      <Id>%s</Id>\n", tbuf);
@@ -607,14 +608,15 @@ write_output_files()
             }
             fprintf(tcxfile, "        <Intensity>");
             switch (plap->intensity) {
+            default:
+                fprintf(stderr, "unknown Intensity value: %d",
+                        plap->intensity);
             case 0:
                 fprintf(tcxfile, "Active");
                 break;
             case 1:
                 fprintf(tcxfile, "Rest");
                 break;
-            default:
-                fprintf(tcxfile, "unknown value: %d", plap->intensity);
             }
             fprintf(tcxfile, "</Intensity>\n");
             // for bike the average cadence of this lap is here
@@ -638,11 +640,12 @@ write_output_files()
             case 1:
                 fprintf(tcxfile, "Distance");
                 break;
+            default:
+                fprintf(stderr, "unknown TriggerMethod value: %d",
+                        plap->triggermethod);
             case 0:
                 fprintf(tcxfile, "Manual");
                 break;
-            default:
-                fprintf(tcxfile, "unknown value: %d", plap->triggermethod);
             }
             fprintf(tcxfile, "</TriggerMethod>\n");
 
@@ -1700,10 +1703,15 @@ revent(uchar chan, uchar event)
             printf("channel status %d\n", ebuf[1]);
         break;
     case EVENT_RX_FAIL:
+    case EVENT_TRANSFER_RX_FAILED:
         // ignore this
         break;
         // TODO: something better.
-    case 6:                    // EVENT_TRANSFER_TX_FAILED
+    case EVENT_RX_SEARCH_TIMEOUT:
+        printf
+            ("Timeout, please make sure the device is not in standby.\n");
+        break;
+    case EVENT_TRANSFER_TX_FAILED:
         printf("Reacking: %02x %s\n", chan, ackpkt);
         ANT_SendBurstTransferA(chan, ackpkt, strlen((char *) ackpkt) / 16);
         break;
