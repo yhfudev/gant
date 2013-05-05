@@ -18,6 +18,9 @@
 #include "antdefs.h"
 #include "antlib.h"
 
+#define MSGD(level, ...) {if (dbg && (level) <= dbg){fprintf(stderr, "DEBUG(%d): ", level); fprintf(stderr, __VA_ARGS__); fprintf(stderr, " in line %d.\n", __LINE__);}}
+#define MSGE(...) {fprintf(stderr, "ERROR: "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, " in line %d.\n", __LINE__);}
+
 // all version numbering according ant agent for windows 2.2.1
 char *releasetime = "Jul 30 2009, 17:42:56";
 uint majorrelease = 2;
@@ -215,9 +218,9 @@ printtrackpoint(trackpoint_t * ptrackpoint)
 int gottype;
 int sentauth;
 int gotwatchid;
-int nopairing;
-int nowriteauth;
-int reset;
+int nopairing = 0;
+int nowriteauth = 0;
+int reset = 0;
 int dbg = 0;
 int seenphase0 = 0;
 int lastphase;
@@ -341,7 +344,7 @@ ground(double d)
     else
         l = l / 10;
 
-    sprintf(res, "%s%ld.%07ld", neg ? "-" : "", ival, l);
+    snprintf(res, sizeof(res), "%s%ld.%07ld", neg ? "-" : "", ival, l);
     return res;
 }
 
@@ -355,9 +358,9 @@ timestamp(void)
     gettimeofday(&tv, 0);
     tmp = gmtime(&tv.tv_sec);
 
-    sprintf(time, "%02d:%02d:%02d.%02d",
-            tmp->tm_hour, tmp->tm_min, tmp->tm_sec,
-            (int) tv.tv_usec / 10000);
+    snprintf(time, sizeof(time), "%02d:%02d:%02d.%02d",
+             tmp->tm_hour, tmp->tm_min, tmp->tm_sec,
+             (int) tv.tv_usec / 10000);
     return time;
 }
 
@@ -446,6 +449,46 @@ write_tcx_footer(FILE * tcxfile)
 }
 
 void
+dump_data(FILE * out, void *data, size_t offset, size_t size)
+{
+    unsigned char buf[16];
+    int i, j;
+    for (i = 0; i < size; i += 16) {
+        memset(buf, 0, sizeof buf);
+        memcpy(buf, data + offset + i, (size - i >= 16) ? 16 : (size - i));
+        fprintf(out, "0x%04x:", offset + i);
+
+        for (j = 0; j < 16; j++) {
+            if (j == 8)
+                fprintf(out, " ");
+
+            if (i + j >= size)
+                fprintf(out, "   ");
+            else
+                fprintf(out, " %02x", buf[j]);
+        }                       // for (j=0; j < 16; j++)
+
+        fprintf(out, " ");
+        for (j = 0; j < 16; j++) {
+            if (i + j >= size)
+                break;
+
+            if (j == 8)
+                fprintf(out, " ");
+
+            if (isprint(buf[j]))
+                fprintf(out, "%c", buf[j]);
+            else
+                fprintf(out, ".");
+        }                       // for (j=0; j < 16; j++)
+
+        fprintf(out, "\n");
+    }                           // for (i=0; i < size; i+=16)
+
+    return;
+}                               // void dump_data(void *data, siz...
+
+void
 write_trackpoint(FILE * tcxfile, activity_t * pact, lap_t * plap,
                  trackpoint_t * ptrackpoint)
 {
@@ -521,7 +564,7 @@ write_trackpoint(FILE * tcxfile, activity_t * pact, lap_t * plap,
 void
 write_output_files()
 {
-    printf("Writing output files.\n");
+    MSGD(1, "Writing output files.\n");
     int activity = 0;
     float total_secs = 0;
     for (activity = 0; activity < MAXACTIVITIES; activity++) {
@@ -540,7 +583,8 @@ write_output_files()
         strftime(tbuf, sizeof tbuf, "%Y-%m-%d-%H%M%S.TCX",
                  localtime(&lapbuf[pact->startlap].tv_lap));
         // open file and start with header of xml file
-        printf("Writing output file for activity %d: %s ", activity, tbuf);
+        MSGD(4, "Writing output file for activity %d: %s ", activity,
+             tbuf);
         tcxfile = fopen(tbuf, "wt");
         write_tcx_header(tcxfile);
 
@@ -721,9 +765,9 @@ write_output_files()
     }
 
 
-    printf("Downloaded %d activities; ", nactivities);
+    MSGD(1, "Downloaded %d activities; ", nactivities);
     print_duration(total_secs);
-    printf(" of data.\n");
+    MSGD(4, " of data.\n");
 }
 
 
@@ -766,21 +810,24 @@ void
 generic_decode(ushort bloblen, ushort pkttype, ushort pktlen,
                int dsize, uchar * data)
 {
-    printf("decode %d %d %d %d\n", bloblen, pkttype, pktlen, dsize);
+    MSGD(1, "decode %d %d %d %d\n", bloblen, pkttype, pktlen, dsize);
     int doff = 20;
     int i = 0;
     switch (pkttype) {
     default:
-        printf("don't know how to decode packet type %d\n", pkttype);
-        for (i = doff; i < dsize && i < doff + pktlen; i++)
-            printf("%02x", data[i]);
-        printf("\n");
-        for (i = doff; i < dsize && i < doff + pktlen; i++)
-            if (isprint(data[i]))
-                printf("%c", data[i]);
-            else
-                printf(".");
-        printf("\n");
+        MSGE("don't know how to decode packet type %d\n", pkttype);
+        for (i = doff; i < dsize && i < doff + pktlen; i++) {
+            MSGD(6, " -: %02x", data[i]);
+        }
+
+        for (i = doff; i < dsize && i < doff + pktlen; i++) {
+            if (isprint(data[i])) {
+                MSGD(6, " --: %c", data[i]);
+            } else {
+                MSGD(6, " --: .");
+            }
+        }
+
         exit(1);
     }
 }
@@ -794,34 +841,33 @@ version_decode(ushort bloblen, ushort pkttype, ushort pktlen,
     int i = 0;
     char model[256];
     char gpsver[256];
-    printf("version decode %d %d %d %d\n", bloblen, pkttype, pktlen,
-           dsize);
+    MSGD(3, "version decode %d %d %d %d\n", bloblen, pkttype, pktlen,
+         dsize);
 
     // any response here allows us to move forward.
     if (nacksent > nlastcompletedcmd) {
-        printf("completed command %d %d\n", nacksent, nlastcompletedcmd);
+        MSGD(5, "completed command %d %d\n", nacksent, nlastcompletedcmd);
         nlastcompletedcmd = nacksent;
     }
 
     switch (pkttype) {
-    case 255:
+    case 255:                  // Identifier
         memset(model, 0, sizeof model);
         memcpy(model, data + doff + 4, dsize - 4);
         part = antshort(data, doff);
         ver = antshort(data, doff + 2);
-        printf("%d Part#: %d ver: %d Name: %s\n", pkttype,
-               part, ver, model);
+        MSGD(1, "%d Part#: %d ver: %d Name: %s\n", pkttype,
+             part, ver, model);
         break;
-    case 248:
+    case 248:                  // GPS identifier
         memset(gpsver, 0, sizeof gpsver);
         memcpy(gpsver, data + doff, dsize);
-        printf("%d GPSver: %s\n", pkttype, gpsver);
-        break;
+        MSGD(1, "Packet %d: GPS: %s", pkttype, gpsver)
+            break;
     case 253:
-        printf("%d Unknown\n", pkttype);
-        for (i = 0; i < pktlen; i += 3)
-            printf("%d.%d.%d\n", data[doff + i], data[doff + i + 1],
-                   data[doff + i + 2]);
+        MSGD(1, "Packet %d: Unknown", pkttype)
+            if (dbg >= 2)
+            dump_data(stderr, data + doff, 0, pktlen);
         break;
     default:
         generic_decode(bloblen, pkttype, pktlen, dsize, data);
@@ -833,11 +879,11 @@ name_decode(ushort bloblen, ushort pkttype, ushort pktlen,
             int dsize, uchar * data)
 {
     int doff = 20;
-    printf("name decode %d %d %d %d\n", bloblen, pkttype, pktlen, dsize);
+    MSGD(5, "name decode %d %d %d %d\n", bloblen, pkttype, pktlen, dsize);
 
     // any response here allows us to move forward.
     if (nacksent > nlastcompletedcmd) {
-        printf("completed command %d %d\n", nacksent, nlastcompletedcmd);
+        MSGD(5, "completed command %d %d\n", nacksent, nlastcompletedcmd);
         nlastcompletedcmd = nacksent;
     }
 
@@ -845,8 +891,8 @@ name_decode(ushort bloblen, ushort pkttype, ushort pktlen,
     case 525:
         memset(devname, 0, sizeof devname);
         memcpy(devname, data + doff, dsize);
-        printf("%d Devname %s\n", pkttype, devname);
-        break;
+        MSGD(1, "Packet %d: Devname: \"%s\"", pkttype, devname)
+            break;
     default:
         generic_decode(bloblen, pkttype, pktlen, dsize, data);
     }
@@ -857,18 +903,18 @@ unit_decode(ushort bloblen, ushort pkttype, ushort pktlen,
             int dsize, uchar * data)
 {
     int doff = 20;
-    printf("unit decode %d %d %d %d\n", bloblen, pkttype, pktlen, dsize);
+    MSGD(5, "unit decode %d %d %d %d\n", bloblen, pkttype, pktlen, dsize);
 
     // any response here allows us to move forward.
     if (nacksent > nlastcompletedcmd) {
-        printf("completed command %d %d\n", nacksent, nlastcompletedcmd);
+        MSGD(5, "completed command %d %d\n", nacksent, nlastcompletedcmd);
         nlastcompletedcmd = nacksent;
     }
 
     switch (pkttype) {
     case 38:
         unitid = antuint(data, doff);
-        printf("%d unitid %u\n", pkttype, unitid);
+        MSGD(3, "%d unitid %u\n", pkttype, unitid);
         break;
     default:
         generic_decode(bloblen, pkttype, pktlen, dsize, data);
@@ -881,21 +927,21 @@ position_decode(ushort bloblen, ushort pkttype, ushort pktlen,
 {
     int doff = 20;
     int i = 0;
-    printf("position decode %d %d %d %d\n", bloblen, pkttype, pktlen,
-           dsize);
+    MSGD(5, "position decode %d %d %d %d\n", bloblen, pkttype, pktlen,
+         dsize);
 
     // any response here allows us to move forward.
     if (nacksent > nlastcompletedcmd) {
-        printf("completed command %d %d\n", nacksent, nlastcompletedcmd);
+        MSGD(5, "completed command %d %d\n", nacksent, nlastcompletedcmd);
         nlastcompletedcmd = nacksent;
     }
 
     switch (pkttype) {
     case 17:
-        printf("%d position ? ", pkttype);
+        MSGD(1, "Packet %d position ? ", pkttype);
         for (i = 0; i < pktlen; i += 4)
-            printf(" %u", antuint(data, doff + i));
-        printf("\n");
+            MSGD(6, " -: %u", antuint(data, doff + i));
+
         break;
     default:
         generic_decode(bloblen, pkttype, pktlen, dsize, data);
@@ -907,20 +953,20 @@ time_decode(ushort bloblen, ushort pkttype, ushort pktlen,
             int dsize, uchar * data)
 {
     int doff = 20;
-    printf("time decode %d %d %d %d\n", bloblen, pkttype, pktlen, dsize);
+    MSGD(5, "time decode %d %d %d %d\n", bloblen, pkttype, pktlen, dsize);
 
     // any response here allows us to move forward.
     if (nacksent > nlastcompletedcmd) {
-        printf("completed command %d %d\n", nacksent, nlastcompletedcmd);
+        MSGD(5, "completed command %d %d\n", nacksent, nlastcompletedcmd);
         nlastcompletedcmd = nacksent;
     }
 
     switch (pkttype) {
-    case 14:
-        printf("%d time: ", pkttype);
-        printf("%02u-%02u-%u %02u:%02u:%02u\n", data[doff], data[doff + 1],
-               antshort(data, doff + 2), data[doff + 4], data[doff + 6],
-               data[doff + 7]);
+    case 14:                   // Current time (UTC)
+        MSGD(3, "Packet %d Timestamp: ", pkttype);
+        MSGD(3, "%02u-%02u-%u %02u:%02u:%02u\n", data[doff],
+             data[doff + 1], antshort(data, doff + 2), data[doff + 4],
+             data[doff + 6], data[doff + 7]);
         break;
     default:
         generic_decode(bloblen, pkttype, pktlen, dsize, data);
@@ -932,12 +978,12 @@ software_decode(ushort bloblen, ushort pkttype, ushort pktlen,
                 int dsize, uchar * data)
 {
     int doff = 20;
-    printf("software decode %d %d %d %d\n", bloblen, pkttype, pktlen,
-           dsize);
+    MSGD(5, "software decode %d %d %d %d\n", bloblen, pkttype, pktlen,
+         dsize);
 
     // any response here allows us to move forward.
     if (nacksent > nlastcompletedcmd) {
-        printf("completed command %d %d\n", nacksent, nlastcompletedcmd);
+        MSGD(5, "completed command %d %d\n", nacksent, nlastcompletedcmd);
         nlastcompletedcmd = nacksent;
     }
 
@@ -945,7 +991,7 @@ software_decode(ushort bloblen, ushort pkttype, ushort pktlen,
     case 247:
         memset(modelname, 0, sizeof modelname);
         memcpy(modelname, data + doff + 88, dsize - 88);
-        printf("%d Device name %s\n", pkttype, modelname);
+        MSGD(1, "%d Device name %s\n", pkttype, modelname);
         break;
     default:
         generic_decode(bloblen, pkttype, pktlen, dsize, data);
@@ -960,23 +1006,23 @@ unknown_decode(ushort bloblen, ushort pkttype, ushort pktlen,
     // interpret the results of.
     int doff = 20;
     int i = 0;
-    printf("unknown decode %d %d %d %d\n", bloblen, pkttype, pktlen,
-           dsize);
+    MSGD(5, "unknown decode %d %d %d %d\n", bloblen, pkttype, pktlen,
+         dsize);
 
     // any response here allows us to move forward.
     if (nacksent > nlastcompletedcmd) {
-        printf("completed command %d %d\n", nacksent, nlastcompletedcmd);
+        MSGD(5, "completed command %d %d\n", nacksent, nlastcompletedcmd);
         nlastcompletedcmd = nacksent;
     }
 
     switch (pkttype) {
-    case 1523:
-    case 994:
-    case 1066:
-        printf("%d ints?", pkttype);
+    case 1523:                 // Max Trackpoints (?) 10000
+    case 994:                  // Drei Limits (?) 200, 25, 200
+    case 1066:                 // 20, 200, 100, ????
+        MSGD(1, "Packet %d: ints?", pkttype);
         for (i = 0; i < pktlen; i += 4)
-            printf(" %u", antuint(data, doff + i));
-        printf("\n");
+            MSGD(6, " -: %u", antuint(data, doff + i));
+
         break;
     default:
         generic_decode(bloblen, pkttype, pktlen, dsize, data);
@@ -991,55 +1037,56 @@ laps_decode(ushort bloblen, ushort pkttype, ushort pktlen,
     int lap = -1;
     int i = 0;
     int found_laps = 0;
-    printf("laps decode %d %d %d %d\n", bloblen, pkttype, pktlen, dsize);
+    MSGD(5, "laps decode %d %d %d %d\n", bloblen, pkttype, pktlen, dsize);
     switch (pkttype) {
     case 12:
-        printf("%d xfer complete", pkttype);
+        MSGD(1, "Packet %d: xfer complete", pkttype);
 
-        for (i = 0; i < pktlen; i += 2)
-            printf(" %u", antshort(data, doff + i));
-        printf("\n");
+        for (i = 0; i < pktlen; i += 2) {
+            MSGD(6, " -: %u", antshort(data, doff + i));
+        }
+
         // don't know what to do with the code here
         // antshort(data, doff);
 
         // make sure we got all the laps.
         for (i = 0; i < MAXLAPS; i++) {
             if (lapbuf[i].lapnum != -1) {
-                //        if (dbg) {
-                //          printlap(&lapbuf[i]);
-                //        }
+                //if (dbg) {
+                //    printlap(&lapbuf[i]);
+                //}
                 found_laps++;
             }
         }
         if (nlaps == found_laps) {
-            printf("All laps received (%d).\n", found_laps);
+            MSGD(5, "All laps received (%d).\n", found_laps);
 
             // only allow completion if we get packet type 12 and have all the laps.
             if (nacksent > nlastcompletedcmd) {
-                printf("completed command %d %d\n", nacksent,
-                       nlastcompletedcmd);
+                MSGD(5, "completed command %d %d\n", nacksent,
+                     nlastcompletedcmd);
                 nlastcompletedcmd = nacksent;
             }
         } else {
-            printf("Not all laps received; only got %d/%d. Will retry.\n",
-                   found_laps, nlaps);
+            MSGD(5, "Not all laps received; only got %d/%d. Will retry.\n",
+                 found_laps, nlaps);
         }
         break;
-    case 27:
+    case 27:                   // Number of following packages
         nlaps = antshort(data, doff);
-        printf("%d laps %u\n", pkttype, nlaps);
+        MSGD(3, "Packet %d laps/?nRuns?: %u\n", pkttype, nlaps);
         break;
     case 149:
-        printf("%d Lap data id: %u %u\n", pkttype,
-               antshort(data, doff), antshort(data, doff + 2));
+        MSGD(3, "Packet %d Lap data id: %u %u\n", pkttype,
+             antshort(data, doff), antshort(data, doff + 2));
         lap = antshort(data, doff);
         if (lap < 0) {
-            printf("Bad lap specified %d.\n", lap);
+            MSGD(5, "Bad lap specified %d.\n", lap);
             exit(1);
         } else if (lap < MAXLAPS) {
             decodelap(&lapbuf[lap], lap, data + doff);
         } else {
-            printf("Not enough laps.");
+            MSGE("Not enough laps.");
             exit(1);
         }
 
@@ -1057,15 +1104,14 @@ activities_decode(ushort bloblen, ushort pkttype, ushort pktlen,
     int i = 0;
     int activity = 0;
     int found_activities = 0;
-    printf("activities decode %d %d %d %d\n", bloblen, pkttype, pktlen,
-           dsize);
+    MSGD(5, "activities decode %d %d %d %d\n", bloblen, pkttype, pktlen,
+         dsize);
     switch (pkttype) {
     case 12:
-        printf("%d xfer complete", pkttype);
+        MSGD(5, "%d xfer complete", pkttype);
 
         for (i = 0; i < pktlen; i += 2)
-            printf(" %u", antshort(data, doff + i));
-        printf("\n");
+            MSGD(5, " -: %u", antshort(data, doff + i));
 
         // don't know what to do with the code here
         // antshort(data, doff);
@@ -1080,46 +1126,46 @@ activities_decode(ushort bloblen, ushort pkttype, ushort pktlen,
             }
         }
         if ((nactivities - nsummarized_activities) == found_activities) {
-            printf
-                ("All activities received (%d complete, %d summarized).\n",
+            MSGD(5,
+                 "All activities received (%d complete, %d summarized).\n",
                  found_activities, nsummarized_activities);
 
             // only allow completion if we get packet type 12.
             if (nacksent > nlastcompletedcmd) {
-                printf("completed command %d %d\n", nacksent,
-                       nlastcompletedcmd);
+                MSGD(5, "completed command %d %d\n", nacksent,
+                     nlastcompletedcmd);
                 nlastcompletedcmd = nacksent;
             }
         } else {
-            printf
-                ("Not all activities received; got %d/%d (%d summarized). Will retry.\n",
+            MSGD(5,
+                 "Not all activities received; got %d/%d (%d summarized). Will retry.\n",
                  found_activities, nactivities, nsummarized_activities);
         }
         break;
-    case 27:
+    case 27:                   // Number of following packages
         nactivities = antshort(data, doff);
         nsummarized_activities = 0;
-        printf("%d activities %u\n", pkttype, nactivities);
+        MSGD(5, "%d activities %u\n", pkttype, nactivities);
         break;
-    case 990:
-        printf("%d activity %u lap %u-%u sport %u\n", pkttype,
-               antshort(data, doff), antshort(data, doff + 2),
-               antshort(data, doff + 4), data[doff + 6]);
-        printf("%d shorts?", pkttype);
+    case 990:                  // Activity specification
+        MSGD(4, "Packet %d Activity %u lap %u-%u sport %u\n", pkttype,
+             antshort(data, doff), antshort(data, doff + 2),
+             antshort(data, doff + 4), data[doff + 6]);
+        MSGD(5, "%d shorts?", pkttype);
         for (i = 0; i < pktlen; i += 2)
-            printf(" %u", antshort(data, doff + i));
-        printf("\n");
+            MSGD(6, " -: %u", antshort(data, doff + i));
+
         activity = antshort(data, doff);
         // summarized activites (all trackpoints have been thrown away) are
         // represented as activities with -1 activitynums.
         if (activity < 0) {
-            printf("Summarized activity specified (%d), ignoring.\n",
-                   activity);
+            MSGD(5, "Summarized activity specified (%d), ignoring.\n",
+                 activity);
             nsummarized_activities++;
         } else if (activity < MAXACTIVITIES) {
             decodeactivity(&activitybuf[activity], activity, &data[doff]);
         } else {
-            printf("Not enough activities.");
+            MSGE("Not enough activities.");
             exit(1);
         }
         break;
@@ -1137,15 +1183,15 @@ trackpoints_decode(ushort bloblen, ushort pkttype, ushort pktlen,
     int i = 0;
     //int j = 0;
     int found_trackpoints = 0;
-    printf("trackpoints decode %d %d %d %d\n", bloblen, pkttype, pktlen,
-           dsize);
+    MSGD(5, "trackpoints decode %d %d %d %d\n", bloblen, pkttype, pktlen,
+         dsize);
     switch (pkttype) {
     case 12:
-        printf("%d xfer complete", pkttype);
+        MSGD(5, "%d xfer complete", pkttype);
 
         for (i = 0; i < pktlen; i += 2)
-            printf(" %u", antshort(data, doff + i));
-        printf("\n");
+            MSGD(6, " -: %u", antshort(data, doff + i));
+
         // don't know what to do with the code here
         // antshort(data, doff);
 
@@ -1153,13 +1199,13 @@ trackpoints_decode(ushort bloblen, ushort pkttype, ushort pktlen,
         for (i = 0; i < MAXACTIVITIES; i++) {
             found_trackpoints += ntrackpoints[i];
             if (ntrackpoints[i] > 0) {
-                printf("%d trackpoints for activity %d\n", ntrackpoints[i],
-                       i);
-                //        int j = 0;
-                //        for (j = 0 ; j < ntrackpoints[i] ; j++) {
-                //          if (dbg) {
-                //            printtrackpoint(&trackpointbuf[i][j]);
-                //          }
+                MSGD(5, "%d trackpoints for activity %d\n",
+                     ntrackpoints[i], i);
+                //int j = 0;
+                //for (j = 0 ; j < ntrackpoints[i] ; j++) {
+                //    if (dbg) {
+                //        printtrackpoint(&trackpointbuf[i][j]);
+                //    }
                 //}
             }
         }
@@ -1169,18 +1215,18 @@ trackpoints_decode(ushort bloblen, ushort pkttype, ushort pktlen,
         if (ntotal_trackpoints == (found_trackpoints +
                                    (nactivities -
                                     nsummarized_activities))) {
-            printf("All trackpoints received (%d).\n", found_trackpoints);
+            MSGD(5, "All trackpoints received (%d).\n", found_trackpoints);
 
             // only allow completion if we get packet type 12 and have all
             // trackpoints.
             if (nacksent > nlastcompletedcmd) {
-                printf("completed command %d %d\n", nacksent,
-                       nlastcompletedcmd);
+                MSGD(5, "completed command %d %d\n", nacksent,
+                     nlastcompletedcmd);
                 nlastcompletedcmd = nacksent;
             }
         } else {
-            printf
-                ("Not all trackpoints received; got %d/%d (%d activities, %d summarized). Will retry.\n",
+            MSGD(5,
+                 "Not all trackpoints received; got %d/%d (%d activities, %d summarized). Will retry.\n",
                  found_trackpoints, ntotal_trackpoints, nactivities,
                  nsummarized_activities);
         }
@@ -1188,16 +1234,17 @@ trackpoints_decode(ushort bloblen, ushort pkttype, ushort pktlen,
         // trackpoints are given as a run of trackpoints per activity; they'll
         // give us a 99 to switch activities.
     case 99:
-        printf("%d trackindex %u\n", pkttype, antshort(data, doff));
-        printf("%d shorts?", pkttype);
+        MSGD(1, "Packet %d trackindex %u\n", pkttype,
+             antshort(data, doff));
+        MSGD(5, "%d shorts?", pkttype);
         for (i = 0; i < pktlen; i += 2)
-            printf(" %u", antshort(data, doff + i));
-        printf("\n");
+            MSGD(6, " -: %u", antshort(data, doff + i));
+
         current_trackpoint_activity = antshort(data, doff);
         break;
-    case 27:
+    case 27:                   // Number of following packages
         ntotal_trackpoints = antshort(data, doff);
-        printf("%d trackpoints %u\n", pkttype, ntotal_trackpoints);
+        MSGD(3, "%d trackpoints %u\n", pkttype, ntotal_trackpoints);
         int i = 0;
         for (i = 0; i < MAXACTIVITIES; i++) {
             ntrackpoints[i] = 0;
@@ -1207,10 +1254,10 @@ trackpoints_decode(ushort bloblen, ushort pkttype, ushort pktlen,
         current_trackpoint_activity = -1;
         break;
     case 1510:
-        printf("%d trackpoints", pkttype);
+        MSGD(5, "%d trackpoints", pkttype);
         for (i = 0; i < 4 && i < pktlen; i += 4)
-            printf(" %u", antuint(data, doff + i));
-        printf("\n");
+            MSGD(6, " -: %u", antuint(data, doff + i));
+
         for (i = 4; i < pktlen; i += 24) {
             // we should probably clean up this memory at some point.
             ntrackpoints[current_trackpoint_activity]++;
@@ -1220,7 +1267,7 @@ trackpoints_decode(ushort bloblen, ushort pkttype, ushort pktlen,
                         ntrackpoints[current_trackpoint_activity]);
 
             if (!trackpointbuf[current_trackpoint_activity]) {
-                printf("Unable to allocate trackpoint buffer.\n");
+                MSGE("Unable to allocate trackpoint buffer.\n");
                 exit(1);
             }
 
@@ -1260,8 +1307,7 @@ chevent(uchar chan, uchar event)
     uint id;
     int i;
     uint cid;
-    if (dbg)
-        printf("chevent %02x %02x\n", chan, event);
+    MSGD(5, "chevent %02x %02x\n", chan, event);
 
     if (event == EVENT_RX_BROADCAST) {
         status = cbuf[1] & 0xd7;
@@ -1271,20 +1317,18 @@ chevent(uchar chan, uchar event)
     cid = antuint(cbuf, 4);
     memcpy((void *) &id, cbuf + 4, 4);
 
-    if (dbg)
-        fprintf(stderr, "cid %08x myid %08x\n", cid, myid);
+    MSGD(6, "cid %08x myid %08x\n", cid, myid);
     if (dbg && event != EVENT_RX_BURST_PACKET) {
-        fprintf(stderr, "chan %d event %02x channel open: ", chan, event);
-        for (i = 0; i < 8; i++)
-            fprintf(stderr, "%02x", cbuf[i]);
-        fprintf(stderr, "\n");
+        MSGD(5, "chan %d event %02x channel open: ", chan, event);
+        for (i = 0; i < 8; i++) {
+            MSGD(5, " -: %02x", cbuf[i]);
+        }
     }
 
     switch (event) {
     case EVENT_RX_BROADCAST:
         lastphase = phase;      // store the last phase we see the watch broadcast
-        if (dbg)
-            printf("lastphase %d\n", lastphase);
+        MSGD(3, "Lastphase %d\n", lastphase);
         if (!pairing && !nopairing)
             pairing = cbuf[1] & 8;
         if (!gottype) {
@@ -1292,41 +1336,39 @@ chevent(uchar chan, uchar event)
             isa50 = cbuf[1] & 4;
             isa405 = cbuf[1] & 1;
             if ((isa50 && isa405) || (!isa50 && !isa405)) {
-                fprintf(stderr, "50 %d and 405 %d\n", isa50, isa405);
+                MSGE("50 %d and 405 %d\n", isa50, isa405);
                 exit(1);
             }
         }
         if (verbose) {
             switch (phase) {
             case 0:
-                fprintf(stderr, "%s BC0 %02x %d %d %d PID %d %d %d %c%c\n",
-                        timestamp(),
-                        cbuf[0], cbuf[1] & 0xd7, cbuf[2], cbuf[3],
-                        antshort(cbuf, 4), cbuf[6], cbuf[7],
-                        (cbuf[1] & 0x20) ? 'N' : ' ',
-                        (cbuf[1] & 0x08) ? 'P' : ' ');
+                MSGD(4, "%s BC0 %02x %d %d %d PID %d %d %d %c%c\n",
+                     timestamp(),
+                     cbuf[0], cbuf[1] & 0xd7, cbuf[2], cbuf[3],
+                     antshort(cbuf, 4), cbuf[6], cbuf[7],
+                     (cbuf[1] & 0x20) ? 'N' : ' ',
+                     (cbuf[1] & 0x08) ? 'P' : ' ');
                 break;
             case 1:
-                fprintf(stderr, "%s BC1 %02x %d %d %d CID %08x %c%c\n",
-                        timestamp(),
-                        cbuf[0], cbuf[1] & 0xd7, cbuf[2], cbuf[3], cid,
-                        (cbuf[1] & 0x20) ? 'N' : ' ',
-                        (cbuf[1] & 0x08) ? 'P' : ' ');
+                MSGD(4, "%s BC1 %02x %d %d %d CID %08x %c%c\n",
+                     timestamp(),
+                     cbuf[0], cbuf[1] & 0xd7, cbuf[2], cbuf[3], cid,
+                     (cbuf[1] & 0x20) ? 'N' : ' ',
+                     (cbuf[1] & 0x08) ? 'P' : ' ');
                 break;
-                fprintf(stderr, "%s BCX %02x %d %d %d PID %d %d %d %c%c\n",
-                        timestamp(),
-                        cbuf[0], cbuf[1] & 0xd7, cbuf[2], cbuf[3],
-                        antshort(cbuf, 4), cbuf[6], cbuf[7],
-                        (cbuf[1] & 0x20) ? 'N' : ' ',
-                        (cbuf[1] & 0x08) ? 'P' : ' ');
+                MSGD(4, "%s BCX %02x %d %d %d PID %d %d %d %c%c\n",
+                     timestamp(),
+                     cbuf[0], cbuf[1] & 0xd7, cbuf[2], cbuf[3],
+                     antshort(cbuf, 4), cbuf[6], cbuf[7],
+                     (cbuf[1] & 0x20) ? 'N' : ' ',
+                     (cbuf[1] & 0x08) ? 'P' : ' ');
             default:
                 break;
             }
         }
 
-        if (dbg)
-            printf("watch status %02x stage %d id %08x\n", status, phase,
-                   id);
+        MSGD(6, "watch status %02x stage %d id %08x\n", status, phase, id);
 
         if (!sentid) {
             sentid = 1;
@@ -1334,7 +1376,7 @@ chevent(uchar chan, uchar event)
         }
         // if we don't see a phase 0 message first, reset the watch
         if (reset || (phase != 0 && !seenphase0)) {
-            fprintf(stderr, "resetting\n");
+            MSGD(4, "Resetting\n");
             ack.code = 0x44;
             ack.atype = 3;
             ack.c1 = 0x00;
@@ -1360,25 +1402,24 @@ chevent(uchar chan, uchar event)
             // generate a random id if pairing and user didn't specify one
             if (pairing && !myid) {
                 myid = randno();
-                fprintf(stderr, "pairing, using id %08x\n", myid);
+                MSGD(4, "pairing, using id %08x\n", myid);
             }
             // need id codes from auth file if not pairing
             // TODO: handle multiple watches
             // BUG: myauth1 should be allowed to be 0
             if (!pairing && !myauth1) {
                 int nr;
-                printf("reading auth data from %s\n", authfile);
+                MSGD(4, "reading auth data from %s\n", authfile);
                 authfd = open(authfile, O_RDONLY);
                 if (authfd < 0) {
                     perror(authfile);
-                    fprintf(stderr, "No auth data. Need to pair first\n");
+                    MSGE("No auth data. Need to pair first\n");
                     exit(1);
                 }
                 nr = read(authfd, authdata, 32);
                 close(authfd);
                 if (nr != 32 && nr != 24) {
-                    fprintf(stderr, "bad auth file len %d != 32 or 24\n",
-                            nr);
+                    MSGE("bad auth file len %d != 32 or 24\n", nr);
                     exit(1);
                 }
                 // BUG: auth file not portable
@@ -1386,9 +1427,8 @@ chevent(uchar chan, uchar event)
                 memcpy((void *) &myauth2, authdata + 20, 4);
                 memcpy((void *) &mydev, authdata + 12, 4);
                 memcpy((void *) &myid, authdata + 4, 4);
-                if (dbg)
-                    fprintf(stderr, "dev %08x auth %08x %08x id %08x\n",
-                            mydev, myauth1, myauth2, myid);
+                MSGD(4, "dev %08x auth %08x %08x id %08x\n",
+                     mydev, myauth1, myauth2, myid);
             }
             // bind to watch
             if (!donebind && devid) {
@@ -1402,24 +1442,19 @@ chevent(uchar chan, uchar event)
                 ack.id = myid;
                 ANT_SendAcknowledgedData(chan, (void *) &ack);  // bind
             } else {
-                if (dbg)
-                    printf("donebind %d devid %x\n", donebind, devid);
+                MSGD(6, "donebind %d devid %x\n", donebind, devid);
             }
             break;
         case 1:
-            if (dbg)
-                printf("case 1 %x\n", peerdev);
+            MSGD(3, "case 1 %x\n", peerdev);
             if (peerdev) {
-                if (dbg)
-                    printf("case 1 peerdev\n");
+                MSGD(4, " -: peerdev\n");
                 // if watch has sent id
                 if (mydev != 0 && peerdev != mydev) {
-                    fprintf(stderr,
-                            "Don't know this device %08x != %08x\n",
-                            peerdev, mydev);
+                    MSGD(1, "Don't know this device %08x != %08x\n",
+                         peerdev, mydev);
                 } else if (!sentauth && !waitauth) {
-                    if (dbg)
-                        printf("case 1 diffdev\n");
+                    MSGD(4, " -: diffdev\n");
                     assert(sizeof auth == AUTHSIZE);
                     auth.code = 0x44;
                     auth.atype = 4;
@@ -1433,12 +1468,10 @@ chevent(uchar chan, uchar event)
                     ANT_SendBurstTransfer(chan, (void *) &auth, (sizeof auth) / 8);     // send our auth data
                 }
             }
-            if (dbg)
-                printf("case 1 cid %x myid %x\n", cid, myid);
+            MSGD(4, " -: cid %x myid %x\n", cid, myid);
             if (!sentack2 && cid == myid && !waitauth) {
                 sentack2 = 1;
-                if (dbg)
-                    printf("sending ack2\n");
+                MSGD(4, " -: sending ack2\n");
                 // if it did bind to me before someone else
                 ack.code = 0x44;
                 ack.atype = 4;
@@ -1454,12 +1487,11 @@ chevent(uchar chan, uchar event)
         case 3:
             if (pairing) {
                 // waiting for the user to pair
-                printf
-                    ("Please press \"View\" on watch to confirm pairing\n");
+                MSGD(4,
+                     "Please press \"View\" on watch to confirm pairing\n");
                 waitauth = 2;   // next burst data is auth data
             } else {
-                if (dbg)
-                    printf("not sure why in phase 3\n");
+                MSGD(1, "not sure why in phase 3\n");
                 if (!sentgetv) {
                     sentgetv = 1;
                     //ANT_SendBurstTransferA(chan, getversion, strlen(getversion)/16);
@@ -1467,33 +1499,31 @@ chevent(uchar chan, uchar event)
             }
             break;
         default:
-            if (dbg)
-                fprintf(stderr, "Unknown phase %d\n", phase);
+            MSGD(1, "Unknown phase %d\n", phase);
             break;
         }
         break;
     case EVENT_RX_BURST_PACKET:
         // now handled in coalesced burst below
-        if (dbg)
-            printf("burst\n");
+        MSGD(5, "Burst\n");
         break;
     case EVENT_RX_FAKE_BURST:
-        if (dbg)
-            printf("rxfake burst pairing %d blast %ld waitauth %d\n",
-                   pairing, (long) blast, waitauth);
+        MSGD(5, "rxfake burst pairing %d blast %ld waitauth %d\n",
+             pairing, (long) blast, waitauth);
         blsize = *(int *) (cbuf + 4);
         memcpy(&blast, cbuf + 4 + sizeof(int), sizeof(uchar *));
         if (dbg) {
-            printf("fake burst %d %lx ", blsize, (long) blast);
+            MSGD(6, "Fake burst %d %lx ", blsize, (long) blast);
             for (i = 0; i < blsize && i < 64; i++)
-                printf("%02x", blast[i]);
-            printf("\n");
-            for (i = 0; i < blsize; i++)
-                if (isprint(blast[i]))
-                    printf("%c", blast[i]);
-                else
-                    printf(".");
-            printf("\n");
+                MSGD(4, " -: %02x", blast[i]);
+
+            for (i = 0; i < blsize; i++) {
+                if (isprint(blast[i])) {
+                    MSGD(6, " --: %c", blast[i]);
+                } else {
+                    MSGD(6, " --:.");
+                }
+            }
         }
         if (sentauth) {
             char *ackdata;
@@ -1501,19 +1531,17 @@ chevent(uchar chan, uchar event)
             ushort bloblen = blast[14] + 256 * blast[15];
             ushort pkttype = blast[16] + 256 * blast[17];
             ushort pktlen = blast[18] + 256 * blast[19];
-            if (dbg)
-                printf("bloblen %d, nacksent %d nlastcompleted %d\n",
-                       bloblen, nacksent, nlastcompletedcmd);
+            MSGD(2, "bloblen %d, nacksent %d nlastcompleted %d\n",
+                 bloblen, nacksent, nlastcompletedcmd);
             if (bloblen == 0) {
                 if ((nacksent == 0) || (nacksent <= nlastcompletedcmd)) {
-                    if (dbg)
-                        printf("bloblen %d, get next data\n", bloblen);
+                    MSGD(4, "bloblen %d, get next data\n", bloblen);
                     // request next set of data
                     ackdata = cmds[nacksent].cmd;
                     nacksent++;
-                    printf("Advancing to command %d\n", nacksent);
+                    MSGD(4, "Advancing to command %d\n", nacksent);
                     if (!strcmp(ackdata, "")) { // finished
-                        printf("cmds finished, resetting\n");
+                        MSGD(4, "cmds finished, resetting\n");
                         ack.code = 0x44;
                         ack.atype = 3;
                         ack.c1 = 0x00;
@@ -1526,52 +1554,47 @@ chevent(uchar chan, uchar event)
                         exit(1);
                     }
                 } else {
-                    printf("Got 0 before complete; reacking %d\n",
-                           nacksent);
+                    MSGD(4, "Got 0 before complete; reacking %d\n",
+                         nacksent);
                     ackdata = cmds[nacksent - 1].cmd;
                 }
-                if (dbg)
-                    printf("got type 0, sending ack %s\n", ackdata);
-                sprintf((char *) ackpkt, "440dffff00000000%s", ackdata);
+                MSGD(4, "got type 0, sending ack %s\n", ackdata);
+                snprintf(ackpkt, sizeof(ackpkt), "440dffff00000000%s",
+                         ackdata);
 
             } else if (bloblen == 65535) {
                 // repeat last ack
-                if (dbg)
-                    printf("repeating ack %s\n", ackpkt);
+                MSGD(2, "Repeating ack %s\n", ackpkt);
                 ANT_SendBurstTransferA(chan, ackpkt,
                                        strlen((char *) ackpkt) / 16);
             } else {
-                if (dbg)
-                    printf("non-0 bloblen %d\n", bloblen);
+                MSGD(2, "Non-0 bloblen %d\n", bloblen);
                 (*cmds[nacksent - 1].decode_fn) (bloblen, pkttype, pktlen,
                                                  blsize, blast);
-                sprintf((char *) ackpkt,
-                        "440dffff0000000006000200%02x%02x0000",
-                        pkttype % 256, pkttype / 256);
+                snprintf(ackpkt, sizeof(ackpkt),
+                         "440dffff0000000006000200%02x%02x0000",
+                         pkttype % 256, pkttype / 256);
             }
-            if (dbg)
-                printf("received pkttype %d len %d\n", pkttype, pktlen);
-            if (dbg)
-                printf("acking %s\n", ackpkt);
+            MSGD(1, "Received pkttype %d len %d\n", pkttype, pktlen);
+            MSGD(2, "Acking %s\n", ackpkt);
             ANT_SendBurstTransferA(chan, ackpkt,
                                    strlen((char *) ackpkt) / 16);
         } else if (!nopairing && pairing && blast) {
             memcpy(&peerdev, blast + 12, 4);
-            if (dbg)
-                printf("watch id %08x waitauth %d\n", peerdev, waitauth);
+            MSGD(1, "watch id %08x waitauth %d\n", peerdev, waitauth);
             if (mydev != 0 && peerdev != mydev) {
-                fprintf(stderr, "Don't know this device %08x != %08x\n",
-                        peerdev, mydev);
+                MSGE("Don't know this device %08x != %08x\n",
+                     peerdev, mydev);
                 exit(1);
             }
             if (waitauth == 2) {
                 int nw;
                 // should be receiving auth data
                 if (nowriteauth) {
-                    printf("Not overwriting auth data\n");
+                    MSGE("Not overwriting auth data\n");
                     exit(1);
                 }
-                printf("storing auth data in %s\n", authfile);
+                MSGD(1, "storing auth data in %s\n", authfile);
                 authfd = open(authfile, O_WRONLY | O_CREAT, 0644);
                 if (authfd < 0) {
                     perror(authfile);
@@ -1579,8 +1602,7 @@ chevent(uchar chan, uchar event)
                 }
                 nw = write(authfd, blast, blsize);
                 if (nw != blsize) {
-                    fprintf(stderr, "auth write failed fd %d %d\n", authfd,
-                            nw);
+                    MSGE("auth write failed fd %d %d\n", authfd, nw);
                     perror("write");
                     exit(1);
                 }
@@ -1603,7 +1625,7 @@ chevent(uchar chan, uchar event)
                 //else
                 //      fprintf(stderr, "pair dev name too large %08x \"%d\"\n", peerdev, peerdev);
                 pair.u1 = strlen(pair.devname);
-                printf("sending pair data for dev %s\n", pair.devname);
+                MSGD(1, "sending pair data for dev %s\n", pair.devname);
                 waitauth = 1;
                 if (isa405 && pairing) {
                     // go straight to storing auth data
@@ -1611,8 +1633,7 @@ chevent(uchar chan, uchar event)
                 }
                 ANT_SendBurstTransfer(chan, (void *) &pair, (sizeof pair) / 8); // send pair data
             } else {
-                if (dbg)
-                    printf("not pairing\n");
+                MSGD(1, "Not pairing\n");
             }
         } else if (!gotwatchid && (lastphase == 1)) {
             static int once = 0;
@@ -1620,26 +1641,23 @@ chevent(uchar chan, uchar event)
             // garmin sending authentication/identification data
             if (!once) {
                 once = 1;
-                if (dbg)
-                    fprintf(stderr, "id data: ");
+                MSGD(1, "id data: ");
             }
-            if (dbg)
-                for (i = 0; i < blsize; i++)
-                    fprintf(stderr, "%02x", blast[i]);
-            if (dbg)
-                fprintf(stderr, "\n");
+            if (dbg) {
+                for (i = 0; i < blsize; i++) {
+                    MSGD(4, " -: %02x", blast[i]);
+                }
+            }
             memcpy(&peerdev, blast + 12, 4);
-            if (dbg)
-                printf("watch id %08x\n", peerdev);
+            MSGD(1, "watch id %08x\n", peerdev);
             if (mydev != 0 && peerdev != mydev) {
-                fprintf(stderr, "Don't know this device %08x != %08x\n",
-                        peerdev, mydev);
+                MSGE("Don't know this device %08x != %08x\n",
+                     peerdev, mydev);
                 exit(1);
             }
         }
 
-        if (dbg)
-            printf("continuing after burst\n");
+        MSGD(1, "continuing after burst\n");
         break;
     }
     return 1;
@@ -1650,15 +1668,13 @@ revent(uchar chan, uchar event)
 {
     int i;
 
-    if (dbg)
-        printf("revent %02x %02x\n", chan, event);
+    MSGD(4, "revent %02x %02x\n", chan, event);
     switch (event) {
     case EVENT_TRANSFER_TX_COMPLETED:
-        if (dbg)
-            printf("Transfer complete %02x\n", ebuf[1]);
+        MSGD(4, "Transfer complete %02x\n", ebuf[1]);
         break;
     case INVALID_MESSAGE:
-        printf("Invalid message %02x\n", ebuf[1]);
+        MSGD(1, "Invalid message %02x\n", ebuf[1]);
         break;
     case RESPONSE_NO_ERROR:
         switch (ebuf[1]) {
@@ -1666,41 +1682,36 @@ revent(uchar chan, uchar event)
             ANT_AssignChannelEventFunction(chan, chevent, cbuf);
             break;
         case MESG_OPEN_CHANNEL_ID:
-            printf("channel open, waiting for broadcast\n");
+            MSGD(1, "channel open, waiting for broadcast\n");
             break;
         default:
-            if (dbg)
-                printf("Message %02x NO_ERROR\n", ebuf[1]);
+            MSGD(4, "Message %02x NO_ERROR\n", ebuf[1]);
             break;
         }
         break;
     case MESG_CHANNEL_ID_ID:
         devid = antshort(ebuf, 1);
         if (mydev == 0 || devid == mydev % 65536) {
-            if (dbg)
-                printf("devid %08x myid %08x\n", devid, myid);
+            MSGD(4, "devid %08x myid %08x\n", devid, myid);
         } else {
-            printf("Ignoring unknown device %08x, mydev %08x\n", devid,
-                   mydev);
+            MSGD(1, "Ignoring unknown device %08x, mydev %08x\n", devid,
+                 mydev);
             devid = sentid = 0; // reset
         }
         break;
     case MESG_NETWORK_KEY_ID:
     case MESG_SEARCH_WAVEFORM_ID:
     case MESG_OPEN_CHANNEL_ID:
-        printf("response event %02x code %02x\n", event, ebuf[2]);
+        MSGD(1, "response event %02x code %02x\n", event, ebuf[2]);
         for (i = 0; i < 8; i++)
-            fprintf(stderr, "%02x", ebuf[i]);
-        fprintf(stderr, "\n");
+            MSGD(4, " -: %02x", ebuf[i]);
         break;
     case MESG_CAPABILITIES_ID:
-        if (dbg)
-            printf("capabilities chans %d nets %d opt %02x adv %02x\n",
-                   ebuf[0], ebuf[1], ebuf[2], ebuf[3]);
+        MSGD(4, "capabilities chans %d nets %d opt %02x adv %02x\n",
+             ebuf[0], ebuf[1], ebuf[2], ebuf[3]);
         break;
     case MESG_CHANNEL_STATUS_ID:
-        if (dbg)
-            printf("channel status %d\n", ebuf[1]);
+        MSGD(4, "channel status %d\n", ebuf[1]);
         break;
     case EVENT_RX_FAIL:
     case EVENT_TRANSFER_RX_FAILED:
@@ -1708,15 +1719,15 @@ revent(uchar chan, uchar event)
         break;
         // TODO: something better.
     case EVENT_RX_SEARCH_TIMEOUT:
-        printf
-            ("Timeout, please make sure the device is not in standby.\n");
+        MSGD(1,
+             "Timeout, please make sure the device is not in standby.\n");
         break;
     case EVENT_TRANSFER_TX_FAILED:
-        printf("Reacking: %02x %s\n", chan, ackpkt);
+        MSGD(1, "Reacking: %02x %s\n", chan, ackpkt);
         ANT_SendBurstTransferA(chan, ackpkt, strlen((char *) ackpkt) / 16);
         break;
     default:
-        printf("Unhandled response event %02x\n", event);
+        MSGD(1, "Unhandled response event %02x\n", event);
         break;
     }
     return 1;
@@ -1741,9 +1752,10 @@ main(int ac, char *av[])
 
     // default auth file //
     if (getenv("HOME")) {
-        authfile = malloc(strlen(getenv("HOME")) + strlen("/.gant") + 1);
+        size_t len = strlen(getenv("HOME")) + strlen("/.gant") + 1;
+        authfile = malloc(len);
         if (authfile)
-            sprintf(authfile, "%s/.gant", getenv("HOME"));
+            snprintf(authfile, len, "%s/.gant", getenv("HOME"));
     }
     progname = av[0];
     while ((c = getopt(ac, av, "a:d:i:m:vDrnzf:")) != -1) {
@@ -1809,7 +1821,7 @@ main(int ac, char *av[])
         usage();
 
     if (!ANT_Init(devnum, 0)) { // should be 115200 but doesn't fit into a short
-        fprintf(stderr, "open dev %d failed\n", devnum);
+        MSGE("open dev %d failed\n", devnum);
         exit(1);
     }
     ANT_ResetSystem();
