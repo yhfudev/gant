@@ -1,4 +1,6 @@
 # use latex's option -jobname to control the compiling of multiple language text.
+# Author: Yunhui Fu <yhfudev@gmail.com>
+# License: GPL v3.0
 
 LANG=en zh tw
 #LANG=zh
