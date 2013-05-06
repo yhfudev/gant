@@ -1,3 +1,6 @@
+# Author: Yunhui Fu <yhfudev@gmail.com>
+# Lincense: GPL v3.0
+
 if ENABLE_DOXYGEN_DOC
 
 all-local: doxygen.stamp

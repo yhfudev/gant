@@ -1,3 +1,5 @@
+# Author: Yunhui Fu <yhfudev@gmail.com>
+# License: GPL v3.0
 #CC=g++
 
 bin_PROGRAMS=gant
