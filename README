@@ -4,7 +4,7 @@ and other enhensments.
 BTW, I also use the command to indent the source file:
 indent -kr -nut -i4 -psl *.c *.h
 
-Please send patches to http://; I'll attempt to get them
+Please send patches to https://github.com/yhfudev/gant/issues; I'll attempt to get them
 upstream.
 
 === Original README ===
